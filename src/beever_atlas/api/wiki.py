@@ -286,3 +286,56 @@ async def _run_generation(
             error=str(exc),
             target_lang=target_lang,
         )
+
+
+# ---------------------------------------------------------------------------
+# PR-G — Lint endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/lint")
+async def lint_wiki(
+    channel_id: str,
+    target_lang: str | None = Query(default=None),
+    run_coherence_check: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+) -> dict:
+    """Run wiki lint checks for a channel and return findings.
+
+    Three deterministic checks (orphan / stale / duplicate-section)
+    + one bounded LLM coherence pass per page (max 1 call per page).
+    Returns ``{channel_id, target_lang, pages_scanned, findings}``.
+    Always 200 — an empty findings list is the healthy-channel
+    response per the spec.
+    """
+    from beever_atlas.services.wiki_lint import lint_channel_wiki
+    from beever_atlas.wiki.page_store import WikiPageStore
+
+    await assert_channel_access(principal, channel_id)
+    cache = _get_cache()
+    await cache._ensure_db()
+    lang = await _resolve_target_lang(channel_id, target_lang)
+
+    page_store = WikiPageStore(db=cache._db)
+    # Live cluster ids — orphan detection compares against the channel's
+    # current TopicCluster set in Weaviate.
+    stores = get_stores()
+    live_cluster_ids: set[str] = set()
+    try:
+        clusters = await stores.weaviate.list_clusters(channel_id)
+        live_cluster_ids = {str(getattr(c, "id", "") or "") for c in clusters}
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "lint_wiki: could not enumerate live clusters channel=%s — orphan detection will skip",
+            channel_id,
+        )
+
+    report = await lint_channel_wiki(
+        channel_id=channel_id,
+        page_store=page_store,
+        target_lang=lang,
+        live_cluster_ids=live_cluster_ids,
+        run_coherence_check=run_coherence_check,
+        llm_provider=None,  # Production wires LLMProvider here
+    )
+    return report.model_dump(mode="json")

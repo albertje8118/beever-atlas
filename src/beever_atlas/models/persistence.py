@@ -231,7 +231,7 @@ class WikiPageSection(BaseModel):
     """
 
     id: str
-    title: str
+    title: str = ""
     content_md: str = ""
     last_facts_hash: str = ""
 
