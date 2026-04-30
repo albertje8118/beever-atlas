@@ -208,6 +208,7 @@ class ExtractionWorker:
             batch_size=claim_size,
             channel_id=channel_id,
             settle_seconds=self._settle_seconds,
+            max_retries=getattr(settings, "extraction_worker_max_retries", 5),
         )
         counters = {"claimed": len(claimed), "succeeded": 0, "failed": 0, "channels": 0}
         if not claimed:

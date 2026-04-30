@@ -255,6 +255,10 @@ class _FakeChannelMessages:
     @staticmethod
     def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
         for k, v in query.items():
+            if k == "$or" and isinstance(v, list):
+                if not any(_FakeChannelMessages._matches(doc, branch) for branch in v):
+                    return False
+                continue
             if isinstance(v, dict):
                 if "$lt" in v and not (doc.get(k) is not None and doc.get(k) < v["$lt"]):
                     return False
@@ -660,3 +664,111 @@ async def test_sweep_stale_extracting_returns_zero_when_no_stale_rows() -> None:
     store, _ = _store_with_fake()
     swept = await store.sweep_stale_extracting(stale_seconds=600)
     assert swept == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-C: auto-retry of failed rows whose backoff has elapsed
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_claim_re_claims_failed_rows_below_max_retries() -> None:
+    """Spec scenario: ``Failed message becomes eligible for retry``.
+
+    Rows in ``failed`` state with ``attempt_count < max_retries`` AND
+    ``next_attempt_at <= now`` must be re-claimed by the worker so the
+    PR-C exponential backoff retry path actually retries them.
+    """
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "retry-me")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "retry-me",
+        "extraction_status": "failed",
+        "attempt_count": 1,
+        "next_attempt_at": now - timedelta(seconds=1),  # backoff elapsed
+        "created_at": now - timedelta(minutes=5),
+        "timestamp": now,
+        "content": "x",
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, max_retries=5)
+    ids = [d["message_id"] for d in claimed]
+    assert ids == ["retry-me"]
+    # Status flipped to extracting; attempt_count preserved (NOT reset).
+    doc = fake._docs[("slack", "C1", "retry-me")]
+    assert doc["extraction_status"] == "extracting"
+    assert doc["attempt_count"] == 1
+
+
+async def test_claim_does_not_retry_rows_at_max_retries() -> None:
+    """Spec scenario: ``Message exhausts retry budget``.
+
+    A row whose ``attempt_count == max_retries`` is permanently failed.
+    The worker must skip it so the row stays out of the queue.
+    """
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "exhausted")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "exhausted",
+        "extraction_status": "failed",
+        "attempt_count": 5,  # at max
+        "next_attempt_at": now - timedelta(minutes=1),
+        "created_at": now - timedelta(minutes=10),
+        "timestamp": now,
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, max_retries=5)
+    assert claimed == []
+    # Row stays failed.
+    assert fake._docs[("slack", "C1", "exhausted")]["extraction_status"] == "failed"
+
+
+async def test_claim_does_not_retry_failed_rows_in_backoff() -> None:
+    """A failed row whose ``next_attempt_at`` is still in the future
+    must NOT be re-claimed even if ``attempt_count < max_retries``.
+    The backoff schedule is the budget governor."""
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "in-backoff")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "in-backoff",
+        "extraction_status": "failed",
+        "attempt_count": 2,
+        "next_attempt_at": now + timedelta(minutes=5),  # still in cooldown
+        "created_at": now - timedelta(minutes=10),
+        "timestamp": now,
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, max_retries=5)
+    assert claimed == []
+
+
+async def test_claim_drains_pending_and_retried_in_one_pass() -> None:
+    """Both fresh-pending and retry-eligible-failed rows must surface
+    in the same claim cycle so the worker doesn't have to alternate."""
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "fresh")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "fresh",
+        "extraction_status": "pending",
+        "attempt_count": 0,
+        "next_attempt_at": now,
+        "created_at": now - timedelta(minutes=5),
+        "timestamp": now,
+    }
+    fake._docs[("slack", "C1", "retry")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "retry",
+        "extraction_status": "failed",
+        "attempt_count": 1,
+        "next_attempt_at": now - timedelta(seconds=1),
+        "created_at": now - timedelta(minutes=5),
+        "timestamp": now,
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, max_retries=5)
+    ids = sorted(d["message_id"] for d in claimed)
+    assert ids == ["fresh", "retry"]

@@ -909,15 +909,24 @@ class MongoDBStore:
         batch_size: int,
         channel_id: str | None = None,
         settle_seconds: int = 5,
+        max_retries: int = 5,
     ) -> list[dict[str, Any]]:
-        """Atomically claim up to ``batch_size`` pending messages.
+        """Atomically claim up to ``batch_size`` pending OR failed-and-due messages.
 
         Implements design D6 (extraction-worker spec): worker queries rows
-        whose ``extraction_status="pending"``, ``next_attempt_at <= now``,
+        whose ``extraction_status="pending"`` OR (``extraction_status="failed"``
+        AND ``attempt_count < max_retries``), ``next_attempt_at <= now``,
         and ``created_at < now - settle_seconds`` (the settle window gives
         bulk upserts a chance to land before the worker scans), then flips
         them to ``"extracting"`` via per-row ``find_one_and_update`` so two
         worker instances cannot pick up the same row.
+
+        PR-C: ``failed`` rows whose ``next_attempt_at`` has elapsed AND
+        whose ``attempt_count`` is below ``max_retries`` are also eligible.
+        This is the auto-retry path — combined with the content-hash
+        deterministic fact ID (PR-B.1), retries do not produce phantom
+        Weaviate duplicates. Rows that exhaust their retry budget stay
+        ``failed`` permanently.
 
         Returns the claimed documents (with ``_id`` stripped) — possibly
         fewer than ``batch_size`` if the queue is short. Each returned
@@ -933,13 +942,31 @@ class MongoDBStore:
         from pymongo import ReturnDocument
 
         now = datetime.now(tz=UTC)
+        # ``$or`` lets a single claim cycle drain both fresh pending rows
+        # AND failed-but-eligible-for-retry rows. The state-machine
+        # transitions encoded in ``EXTRACTION_STATUS_TRANSITIONS`` allow
+        # ``failed → pending``, but the worker takes the shortcut of
+        # going straight to ``extracting`` here because the row is being
+        # actively reclaimed (the brief intermediate state is invisible
+        # to readers — the find_one_and_update is atomic).
         filter_doc: dict[str, Any] = {
-            "extraction_status": "pending",
+            "$or": [
+                {"extraction_status": "pending"},
+                {
+                    "extraction_status": "failed",
+                    "attempt_count": {"$lt": max_retries},
+                },
+            ],
             "next_attempt_at": {"$lte": now},
             "created_at": {"$lt": now - timedelta(seconds=settle_seconds)},
         }
         if channel_id is not None:
             filter_doc["channel_id"] = channel_id
+        # PR-C: ``attempt_count`` is intentionally NOT reset on the
+        # failed → extracting shortcut. The total attempts encodes the
+        # retry budget (capped by ``max_retries``) and the worker's
+        # backoff schedule expects monotonic counts. m5 from PR-A code
+        # review documented this expectation.
         update_doc = {
             "$set": {
                 "extraction_status": "extracting",

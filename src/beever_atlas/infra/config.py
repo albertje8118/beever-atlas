@@ -506,6 +506,16 @@ class Settings(BaseSettings):
         alias="LLM_FALLBACK_MODEL_MAP",
     )
 
+    # PR-C: maximum retry attempts for failed extraction rows. The
+    # worker re-claims ``failed`` rows whose ``attempt_count`` is below
+    # this cap. Combined with the content-hash deterministic fact ID
+    # (PR-B.1) and exponential backoff [30,60,120,240,480]s, this gives
+    # the system ~17 minutes of soft retries before a row is considered
+    # permanently failed. Default 5 matches the backoff schedule length.
+    extraction_worker_max_retries: int = Field(
+        default=5, ge=1, le=20, alias="EXTRACTION_WORKER_MAX_RETRIES"
+    )
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared
