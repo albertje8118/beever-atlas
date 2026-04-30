@@ -258,6 +258,10 @@ class _FakeChannelMessages:
             if isinstance(v, dict):
                 if "$lt" in v and not (doc.get(k) is not None and doc.get(k) < v["$lt"]):
                     return False
+                if "$lte" in v and not (doc.get(k) is not None and doc.get(k) <= v["$lte"]):
+                    return False
+                if "$gt" in v and not (doc.get(k) is not None and doc.get(k) > v["$gt"]):
+                    return False
                 if "$gte" in v and not (doc.get(k) is not None and doc.get(k) >= v["$gte"]):
                     return False
                 if "$in" in v and doc.get(k) not in v["$in"]:

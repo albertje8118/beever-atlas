@@ -986,10 +986,16 @@ class MongoDBStore:
         from pymongo import UpdateOne
 
         # Determine the set of allowed source states for this transition.
+        # Code-review: do NOT permit self-transitions (``new_status ==
+        # from_state``). The ``EXTRACTION_STATUS_TRANSITIONS`` map encodes
+        # ``done -> done`` as forbidden so a re-extraction must go through
+        # ``failed -> pending -> extracting -> done`` and not silently
+        # skip a step. Idempotency is provided by ``$setOnInsert`` at
+        # upsert time, not by self-transitions here.
         allowed_from = {
             from_state
             for from_state, allowed in EXTRACTION_STATUS_TRANSITIONS.items()
-            if new_status in allowed or new_status == from_state
+            if new_status in allowed
         }
         if not allowed_from:
             logger.warning(

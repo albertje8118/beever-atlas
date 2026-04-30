@@ -247,16 +247,25 @@ class SyncScheduler:
             max_running_jobs=1,
             conflict_policy="do_nothing",
         )
+        # Code-review fix: derive sweep interval from stale_seconds so a
+        # tight ``EXTRACTION_WORKER_STALE_SECONDS`` does not leave rows
+        # orphaned for longer than necessary. Worst-case orphan window is
+        # roughly ``sweep_interval + stale_seconds``; halving the stale
+        # window keeps the worst case proportional to the configured
+        # tolerance. Floor at 60s so we don't hammer Mongo on a
+        # mis-configured tiny stale window.
+        sweep_interval = max(60, settings.extraction_worker_stale_seconds // 2)
         await self._scheduler.add_schedule(
             self._extraction_sweep,
-            IntervalTrigger(seconds=300),
+            IntervalTrigger(seconds=sweep_interval),
             id="extraction:sweep",
             max_running_jobs=1,
             conflict_policy="do_nothing",
         )
         logger.info(
-            "SyncScheduler: ExtractionWorker registered tick=%ds stale=%ds",
+            "SyncScheduler: ExtractionWorker registered tick=%ds sweep=%ds stale=%ds",
             settings.extraction_worker_tick_seconds,
+            sweep_interval,
             settings.extraction_worker_stale_seconds,
         )
 

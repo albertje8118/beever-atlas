@@ -300,3 +300,61 @@ async def test_sweep_stale_delegates_to_store(fake_stores, fake_settings) -> Non
     swept = await worker.sweep_stale()
     assert swept == 7
     fake_stores.mongodb.sweep_stale_extracting.assert_awaited_once_with(stale_seconds=900)
+
+
+# ---------------------------------------------------------------------------
+# Code-review CRITICAL regression: one channel crashing must not orphan others
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_channel_crash_does_not_cancel_sibling_channels(
+    fake_stores, fake_settings
+) -> None:
+    """A bug found in code review: ``asyncio.gather(return_exceptions=False)``
+    cancels sibling tasks if any one raises, leaving their claimed rows
+    stuck in ``"extracting"`` until the stale sweep recovers them up to
+    ~15 minutes later. Under a Gemini 503 storm this creates a livelock
+    where rows cycle pending → extracting → swept → pending without ever
+    making progress.
+
+    The fix uses ``return_exceptions=True`` and finalizes the crashed
+    channel's rows as failed synchronously so the queue doesn't stall.
+    This test locks in that behavior.
+    """
+    docs = [
+        _make_doc(channel_id="crashy", message_id="m1"),
+        _make_doc(channel_id="happy", message_id="m2"),
+    ]
+    fake_stores.mongodb.claim_pending_messages_for_extraction.return_value = docs
+
+    bp = MagicMock()
+
+    async def _process_messages(**kwargs):
+        if kwargs.get("channel_id") == "crashy":
+            raise RuntimeError("simulated worker crash")
+        return MagicMock(errors=[], fact_ids=["f-happy"])
+
+    bp.process_messages = AsyncMock(side_effect=_process_messages)
+    worker = ExtractionWorker(batch_processor=bp)
+    counters = await worker.tick()  # must not raise
+
+    # The healthy channel was NOT cancelled: process_messages was called
+    # for both channels (the OLD return_exceptions=False would have
+    # cancelled the second one mid-flight when crashy raised).
+    called_channels = {c.kwargs.get("channel_id") for c in bp.process_messages.await_args_list}
+    assert called_channels == {"crashy", "happy"}, (
+        f"both channels must reach BatchProcessor — got {called_channels}"
+    )
+
+    # The crashed channel's rows are finalized as failed in-line so the
+    # stale sweep doesn't have to recover them ~15 minutes later.
+    finalize_calls = fake_stores.mongodb.finalize_extraction_status_bulk.await_args_list
+    failed_calls = [c for c in finalize_calls if c.kwargs.get("new_status") == "failed"]
+    assert len(failed_calls) >= 1, (
+        "crashed channel's rows must be finalized as failed, not orphaned in extracting"
+    )
+
+    # And the happy channel had its done finalize fire too.
+    done_calls = [c for c in finalize_calls if c.kwargs.get("new_status") == "done"]
+    assert len(done_calls) >= 1

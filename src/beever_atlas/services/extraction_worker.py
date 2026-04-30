@@ -135,7 +135,6 @@ class ExtractionWorker:
         self._settle_seconds = settle_seconds
         self._stale_seconds = stale_seconds
         self._on_extraction_done: list[ExtractionDoneCallback] = []
-        self._tick_in_flight: int = 0
 
     # ------------------------------------------------------------------
     # Event subscription (used by PR-F WikiMaintainer)
@@ -208,17 +207,65 @@ class ExtractionWorker:
             by_channel.setdefault(doc.get("channel_id", ""), []).append(doc)
         counters["channels"] = len(by_channel)
 
-        async def _process_channel(ch_id: str, docs: list[dict[str, Any]]) -> None:
+        async def _process_channel(ch_id: str, docs: list[dict[str, Any]]) -> tuple[int, int]:
             assert self._semaphore is not None
             async with self._semaphore:
-                ok, fail = await self._process_channel_batch(ch_id, docs)
-                counters["succeeded"] += ok
-                counters["failed"] += fail
+                return await self._process_channel_batch(ch_id, docs)
 
-        await asyncio.gather(
+        # Code-review fix (CRITICAL): use ``return_exceptions=True`` so a
+        # raise in one channel's processing does NOT cancel siblings and
+        # orphan their claimed-but-not-finalized rows. Each channel's
+        # success/failure tally is returned and summed AFTER gather, so
+        # there is no shared-mutation race on ``counters``. If a sibling
+        # itself crashes, we mark its claimed rows as failed via the
+        # store so the stale-sweep doesn't have to recover them later.
+        results: list[tuple[int, int] | BaseException] = await asyncio.gather(
             *[_process_channel(ch, docs) for ch, docs in by_channel.items()],
-            return_exceptions=False,
+            return_exceptions=True,
         )
+        from beever_atlas.stores import get_stores as _get_stores
+
+        stores_ref = _get_stores()
+        for (ch_id, docs), result in zip(by_channel.items(), results, strict=True):
+            if isinstance(result, BaseException):
+                logger.exception(
+                    "ExtractionWorker: channel processing crashed channel=%s "
+                    "rows=%d (finalizing as failed to free the queue): %s",
+                    ch_id,
+                    len(docs),
+                    result,
+                    exc_info=result,
+                )
+                # Free the rows synchronously rather than waiting for the
+                # 5-minute stale sweep — the worker is already alive, just
+                # one channel's task crashed.
+                keys_with_attempts = [
+                    (
+                        (
+                            str(d.get("source_id") or ""),
+                            str(d.get("channel_id") or ""),
+                            str(d.get("message_id") or ""),
+                        ),
+                        int(d.get("attempt_count") or 0),
+                    )
+                    for d in docs
+                ]
+                try:
+                    await self._finalize_failed(
+                        stores_ref,
+                        keys_with_attempts,
+                        error=f"worker_task_crashed: {type(result).__name__}",
+                    )
+                except Exception:
+                    logger.exception(
+                        "ExtractionWorker: post-crash finalize_failed also "
+                        "raised — rows will recover via stale_sweep"
+                    )
+                counters["failed"] += len(docs)
+                continue
+            ok, fail = result
+            counters["succeeded"] += ok
+            counters["failed"] += fail
         logger.info(
             "ExtractionWorker: tick complete claimed=%d succeeded=%d failed=%d channels=%d",
             counters["claimed"],

@@ -65,10 +65,17 @@ class AtomicFact(BaseModel):
         different text or a different entity set yields a different UUID.
         Empty ``entity_names`` is permitted (some fact_types like
         ``"observation"`` may extract zero entities).
+
+        Separator: ``\\x00`` (null byte). Code-review found that pipe
+        characters can legitimately appear in LLM-extracted memory_text
+        (\"option A | option B\"), which would alias with the entity
+        join separator and create deterministic collisions across
+        unrelated facts. Null bytes cannot appear in natural-language
+        text, so they are an unambiguous separator.
         """
         namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-        normalized_entities = "|".join(sorted(str(n) for n in entity_names))
-        digest = hashlib.sha256(f"{memory_text}|{normalized_entities}".encode()).hexdigest()[:16]
+        normalized_entities = "\x00".join(sorted(str(n) for n in entity_names))
+        digest = hashlib.sha256(f"{memory_text}\x00{normalized_entities}".encode()).hexdigest()[:16]
         return str(uuid.uuid5(namespace, digest))
 
 
