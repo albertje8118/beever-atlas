@@ -98,6 +98,34 @@ class WikiCache:
 
     async def get_page(self, channel_id: str, page_id: str, target_lang: str = "en") -> dict | None:
         await self._ensure_db()
+        # PR-E: when PER_PAGE_WIKI=True, read from the new wiki_pages
+        # collection. Falls back to the legacy monolith doc when the
+        # per-page row is missing — migration may run lazily / only on
+        # first save_page call, so during the soak window pages can
+        # exist in either store. The fallback eliminates a window where
+        # the UI would 404 mid-migration.
+        if get_settings().per_page_wiki:
+            try:
+                from beever_atlas.wiki.page_store import WikiPageStore
+
+                page_store = WikiPageStore(db=self._db)
+                page = await page_store.get_page(
+                    channel_id=channel_id,
+                    page_id=page_id,
+                    target_lang=target_lang,
+                )
+                if page is not None:
+                    # Render to the legacy dict shape callers expect.
+                    return page.model_dump(mode="json")
+            except Exception as exc:  # noqa: BLE001 — fall through to legacy on any error
+                logger.warning(
+                    "WikiCache.get_page: per-page lookup failed, falling back "
+                    "to legacy schema channel=%s page=%s exc=%s",
+                    channel_id,
+                    page_id,
+                    type(exc).__name__,
+                )
+
         key = _cache_key(channel_id, target_lang)
         doc = await self._collection.find_one(
             {"channel_id": key},

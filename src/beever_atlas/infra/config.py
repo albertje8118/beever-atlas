@@ -516,6 +516,18 @@ class Settings(BaseSettings):
         default=5, ge=1, le=20, alias="EXTRACTION_WORKER_MAX_RETRIES"
     )
 
+    # OSS pipeline + wiki redesign — PR-E per-page wiki page-store.
+    # When True, ``WikiCache.get_page`` reads from the new
+    # ``wiki_pages`` collection (one document per
+    # (channel_id, target_lang, page_id)). When False, falls back to
+    # the legacy ``wiki_cache`` flat-pages-subdoc schema. Writes always
+    # go to the new collection so flipping the flag back to OFF after
+    # a soak doesn't lose page edits made under the new path. Default
+    # OFF — staging soak (48h) before flipping in production. Per-page
+    # incremental update (PR-F maintainer) requires PER_PAGE_WIKI=True
+    # to be effective.
+    per_page_wiki: bool = Field(default=False, alias="PER_PAGE_WIKI")
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared

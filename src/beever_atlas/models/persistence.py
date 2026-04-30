@@ -212,3 +212,86 @@ class IdempotencyKeyRecord(BaseModel):
     idempotency_key: str
     response: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+
+
+# ---------------------------------------------------------------------------
+# Wiki page-store split (PR-E of oss-pipeline-and-wiki-redesign)
+# ---------------------------------------------------------------------------
+
+
+class WikiPageSection(BaseModel):
+    """One section within a wiki page.
+
+    The maintainer (PR-F) updates these one at a time when new facts
+    arrive, preserving unchanged sections byte-identical so page voice
+    doesn't drift across incremental rewrites. ``last_facts_hash``
+    records which facts were considered when the section was last
+    written — the maintainer compares against the current fact set to
+    decide whether the section needs a refresh.
+    """
+
+    id: str
+    title: str
+    content_md: str = ""
+    last_facts_hash: str = ""
+
+
+class WikiTension(BaseModel):
+    """A surfaced contradiction between two facts.
+
+    Populated by ``services/contradiction_detector.check_and_supersede``
+    (already running at ``services/batch_processor.py:1283-1317``) and
+    rendered as a Tensions section on the affected pages by PR-G.
+    """
+
+    fact_id: str
+    contradicts_fact_id: str
+    summary: str = ""
+    detected_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+
+
+class WikiPage(BaseModel):
+    """Per-page wiki document keyed by ``(channel_id, target_lang, page_id)``.
+
+    Replaces the flat ``pages`` subdoc on the legacy ``wiki_cache`` row.
+    Per-page documents enable incremental update, per-page versioning,
+    and per-page dirty tracking — none of which were possible with the
+    monolith schema. ``last_facts_seen`` lets the maintainer route new
+    facts to affected pages deterministically (by membership) and to
+    skip pages whose fact set hasn't changed.
+    """
+
+    channel_id: str
+    target_lang: str = "en"
+    page_id: str
+    """Stable slug for the page within the channel + language. Examples:
+    ``topic:auth-redesign``, ``person:alice``, ``decisions``, ``faq``."""
+
+    title: str = ""
+    slug: str = ""
+    """URL slug — preserved across maintainer rewrites so external
+    links from the agent / chat platforms don't break."""
+
+    sections: list[WikiPageSection] = Field(default_factory=list)
+    version: int = 1
+    is_dirty: bool = False
+    """Set by the maintainer in ``manual`` mode when new facts have
+    arrived but the user hasn't clicked ``Maintain Wiki`` yet. The
+    Maintain button reads pages where ``is_dirty=True`` and processes
+    them on demand."""
+
+    last_facts_seen: list[str] = Field(default_factory=list)
+    """Fact IDs that were considered when the page was last written.
+    Maintainer diffs the current channel fact set against this list to
+    decide which pages have new facts to integrate."""
+
+    tensions: list[WikiTension] = Field(default_factory=list)
+    """Inline contradictions surfaced from the contradiction detector."""
+
+    page_voice_seed: str = ""
+    """Optional reference excerpt the maintainer uses to keep the
+    rewrite tone consistent. PR-F populates this on first generation
+    from the original page content; subsequent rewrites preserve it."""
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
