@@ -186,9 +186,7 @@ def _apply_language_state(resp: ChannelResponse, state: Any | None) -> ChannelRe
     )
 
 
-def _channel_message_row_to_response(
-    row: dict[str, Any], channel_id: str
-) -> "MessageResponse":
+def _channel_message_row_to_response(row: dict[str, Any], channel_id: str) -> "MessageResponse":
     """Map a ``channel_messages`` row dict back to the API ``MessageResponse``.
 
     PR-A.5 — used by the dual-read path when ``READ_FROM_MESSAGE_STORE`` is ON.

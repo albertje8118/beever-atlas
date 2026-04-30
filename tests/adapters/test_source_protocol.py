@@ -128,6 +128,5 @@ def test_protocol_module_has_no_notimplementederror_stubs() -> None:
     src = Path(__file__).parents[2] / "src" / "beever_atlas" / "adapters" / "source_protocol.py"
     text = src.read_text(encoding="utf-8")
     assert "NotImplementedError" not in text, (
-        "source_protocol.py must not use NotImplementedError stubs — "
-        "split the protocols instead"
+        "source_protocol.py must not use NotImplementedError stubs — split the protocols instead"
     )

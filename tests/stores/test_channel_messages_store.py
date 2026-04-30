@@ -276,9 +276,7 @@ async def test_upsert_resync_preserves_done_extraction_status() -> None:
 
 async def test_get_channel_messages_returns_all_for_channel() -> None:
     store, _ = _store_with_fake()
-    msgs = [
-        _msg(message_id=f"m{i}") for i in range(5)
-    ]
+    msgs = [_msg(message_id=f"m{i}") for i in range(5)]
     await store.upsert_channel_messages(msgs)
     rows = await store.get_channel_messages(channel_id="C123", limit=10)
     assert len(rows) == 5
@@ -332,18 +330,14 @@ async def test_find_channel_message_by_message_id_returns_doc() -> None:
     the prior phantom ``raw_messages`` reads."""
     store, _ = _store_with_fake()
     await store.upsert_channel_messages([_msg(message_id="m_parent", content="parent text")])
-    doc = await store.find_channel_message_by_message_id(
-        channel_id="C123", message_id="m_parent"
-    )
+    doc = await store.find_channel_message_by_message_id(channel_id="C123", message_id="m_parent")
     assert doc is not None
     assert doc["content"] == "parent text"
 
 
 async def test_find_channel_message_by_message_id_returns_none_when_missing() -> None:
     store, _ = _store_with_fake()
-    doc = await store.find_channel_message_by_message_id(
-        channel_id="C123", message_id="m_missing"
-    )
+    doc = await store.find_channel_message_by_message_id(channel_id="C123", message_id="m_missing")
     assert doc is None
 
 

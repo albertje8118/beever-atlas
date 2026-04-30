@@ -379,7 +379,9 @@ async def test_run_sync_upserts_messages_to_message_store(
         parent_count=1,
     )
 
-    assert upsert_called.get("count") == 1, "upsert_channel_messages was not called with the fetched message"
+    assert upsert_called.get("count") == 1, (
+        "upsert_channel_messages was not called with the fetched message"
+    )
     rows = upsert_called["rows"]
     assert isinstance(rows, list) and len(rows) == 1
     assert rows[0].source_id == "slack"

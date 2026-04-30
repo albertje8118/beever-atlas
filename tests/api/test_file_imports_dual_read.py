@@ -174,9 +174,7 @@ class TestFlagOff:
         fake_imported.count_documents = AsyncMock(return_value=2)
         # Wire a sentinel — store accessor must NOT be called when the flag is OFF.
         mock_stores.mongodb.get_channel_messages = AsyncMock(
-            side_effect=AssertionError(
-                "channel_messages must not be read when the flag is OFF"
-            )
+            side_effect=AssertionError("channel_messages must not be read when the flag is OFF")
         )
 
         with patch.dict(
@@ -187,9 +185,7 @@ class TestFlagOff:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/file-channel-1/messages?limit=10"
-                )
+                response = await client.get("/api/channels/file-channel-1/messages?limit=10")
 
         assert response.status_code == 200, response.text
         data = response.json()
@@ -198,9 +194,7 @@ class TestFlagOff:
         assert all(m["author"] == "U_LEGACY" for m in data["messages"])
         mock_stores.mongodb.get_channel_messages.assert_not_called()
         # Structured log emitted with source="imported_messages".
-        records = [
-            r for r in caplog.records if r.getMessage() == "file_imports_read"
-        ]
+        records = [r for r in caplog.records if r.getMessage() == "file_imports_read"]
         assert len(records) == 1
         assert getattr(records[0], "source", None) == "imported_messages"
 
@@ -232,9 +226,7 @@ class TestFlagOnPopulated:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/file-channel-1/messages?limit=10"
-                )
+                response = await client.get("/api/channels/file-channel-1/messages?limit=10")
 
         assert response.status_code == 200, response.text
         data = response.json()
@@ -245,9 +237,7 @@ class TestFlagOnPopulated:
         call = mock_stores.mongodb.get_channel_messages.await_args
         assert call.kwargs.get("source_id") == "file"
         # Structured log emitted with source="channel_messages".
-        records = [
-            r for r in caplog.records if r.getMessage() == "file_imports_read"
-        ]
+        records = [r for r in caplog.records if r.getMessage() == "file_imports_read"]
         assert len(records) == 1
         assert getattr(records[0], "source", None) == "channel_messages"
 
@@ -280,9 +270,7 @@ class TestFlagOnEmptyStore:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/file-channel-1/messages?limit=10"
-                )
+                response = await client.get("/api/channels/file-channel-1/messages?limit=10")
 
         assert response.status_code == 200, response.text
         data = response.json()
@@ -291,15 +279,11 @@ class TestFlagOnEmptyStore:
         assert data["messages"][0]["author"] == "U_LEGACY"
         mock_stores.mongodb.get_channel_messages.assert_awaited_once()
         # Structured fallback log emitted with reason="empty_store".
-        fallback_records = [
-            r for r in caplog.records if r.getMessage() == "file_imports_fallback"
-        ]
+        fallback_records = [r for r in caplog.records if r.getMessage() == "file_imports_fallback"]
         assert len(fallback_records) == 1
         assert getattr(fallback_records[0], "reason", None) == "empty_store"
         assert getattr(fallback_records[0], "channel_id", None) == "file-channel-1"
         # And then the legacy read emitted its own structured log.
-        read_records = [
-            r for r in caplog.records if r.getMessage() == "file_imports_read"
-        ]
+        read_records = [r for r in caplog.records if r.getMessage() == "file_imports_read"]
         assert len(read_records) == 1
         assert getattr(read_records[0], "source", None) == "imported_messages"

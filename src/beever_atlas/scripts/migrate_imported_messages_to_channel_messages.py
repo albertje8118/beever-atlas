@@ -291,11 +291,7 @@ async def migrate(
                 # so the operator can sanity-check the field mapping before flipping
                 # off the flag.
                 if batch_rows and migrated == 0 and channel_messages:
-                    sample_in = {
-                        k: v
-                        for k, v in batch_rows[0].items()
-                        if k not in ("_id",)
-                    }
+                    sample_in = {k: v for k, v in batch_rows[0].items() if k not in ("_id",)}
                     sample_out = channel_messages[0].model_dump(mode="json")
                     logger.info(
                         json.dumps(

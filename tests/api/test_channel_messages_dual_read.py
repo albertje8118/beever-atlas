@@ -151,9 +151,7 @@ class TestFlagOnPopulated:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/C_MOCK_GENERAL/messages?limit=10"
-                )
+                response = await client.get("/api/channels/C_MOCK_GENERAL/messages?limit=10")
 
         assert response.status_code == 200
         data = response.json()
@@ -167,9 +165,7 @@ class TestFlagOnPopulated:
         # attributes on the LogRecord but pytest's caplog inspects `.message`
         # for the rendered text, so we match against the message string (which
         # is itself the event name in this codebase's structured pattern).
-        assert any(
-            rec.getMessage() == "channel_messages_read" for rec in caplog.records
-        )
+        assert any(rec.getMessage() == "channel_messages_read" for rec in caplog.records)
 
 
 # ----- Scenario: Flag ON, store empty -----------------------------------------
@@ -194,9 +190,7 @@ class TestFlagOnEmptyStore:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/C_MOCK_GENERAL/messages?limit=2"
-                )
+                response = await client.get("/api/channels/C_MOCK_GENERAL/messages?limit=2")
 
         assert response.status_code == 200
         data = response.json()
@@ -208,8 +202,7 @@ class TestFlagOnEmptyStore:
         mock_stores.mongodb.get_channel_messages.assert_awaited_once()
         # Structured fallback log emitted with reason="empty_store".
         fallback_records = [
-            rec for rec in caplog.records
-            if rec.getMessage() == "channel_messages_fallback"
+            rec for rec in caplog.records if rec.getMessage() == "channel_messages_fallback"
         ]
         assert len(fallback_records) == 1
         # Standard logging copies `extra={...}` keys onto the LogRecord as
@@ -234,9 +227,7 @@ class TestFlagOnSyncInProgress:
         caplog = captured_channel_logs
         # Store has rows — but sync is mid-flight, so we MUST fall back to
         # avoid surfacing partial data.
-        mock_stores.mongodb.get_channel_messages = AsyncMock(
-            return_value=[_store_row("M1")]
-        )
+        mock_stores.mongodb.get_channel_messages = AsyncMock(return_value=[_store_row("M1")])
         mock_stores.mongodb.get_sync_status = AsyncMock(
             return_value=SyncJob(channel_id="C_MOCK_GENERAL", status="running")
         )
@@ -246,9 +237,7 @@ class TestFlagOnSyncInProgress:
 
             get_settings.cache_clear()
             with caplog.at_level(logging.INFO, logger="beever_atlas.api.channels"):
-                response = await client.get(
-                    "/api/channels/C_MOCK_GENERAL/messages?limit=2"
-                )
+                response = await client.get("/api/channels/C_MOCK_GENERAL/messages?limit=2")
 
         assert response.status_code == 200
         data = response.json()
@@ -257,8 +246,7 @@ class TestFlagOnSyncInProgress:
         assert all(m["author"] != "U_FROM_STORE" for m in data["messages"])
         # Structured fallback log emitted with reason="sync_in_progress".
         fallback_records = [
-            rec for rec in caplog.records
-            if rec.getMessage() == "channel_messages_fallback"
+            rec for rec in caplog.records if rec.getMessage() == "channel_messages_fallback"
         ]
         assert len(fallback_records) == 1
         assert getattr(fallback_records[0], "reason", None) == "sync_in_progress"

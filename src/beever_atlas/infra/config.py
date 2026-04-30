@@ -424,9 +424,7 @@ class Settings(BaseSettings):
     # flipping in production. See
     # ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
     # → "Dual-read fallback during migration".
-    read_from_message_store: bool = Field(
-        default=False, alias="READ_FROM_MESSAGE_STORE"
-    )
+    read_from_message_store: bool = Field(default=False, alias="READ_FROM_MESSAGE_STORE")
 
     # OSS pipeline + wiki redesign — PR-A.6.2 file-imports cutover.
     # Read-side flag for the file-imports branch in ``api/channels.py``.
@@ -447,9 +445,7 @@ class Settings(BaseSettings):
     # with zero ``channel_messages_fallback`` (reason="empty_store") log
     # lines. ``channel_messages`` writes are unconditional regardless of
     # this flag — only the legacy collection write is gated.
-    write_dual_file_imports: bool = Field(
-        default=True, alias="WRITE_DUAL_FILE_IMPORTS"
-    )
+    write_dual_file_imports: bool = Field(default=True, alias="WRITE_DUAL_FILE_IMPORTS")
 
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose

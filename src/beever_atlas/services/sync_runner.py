@@ -697,9 +697,7 @@ class SyncRunner:
                 try:
                     cm_rows = _normalized_to_channel_messages(messages)
                     if cm_rows:
-                        upsert_result = await stores.mongodb.upsert_channel_messages(
-                            cm_rows
-                        )
+                        upsert_result = await stores.mongodb.upsert_channel_messages(cm_rows)
                         inserted_count = int(upsert_result.get("inserted", 0))
                         logger.info(
                             "SyncRunner: channel_messages upsert job_id=%s channel=%s "
@@ -772,13 +770,13 @@ class SyncRunner:
                 # PR-0: Build structured per-batch diagnostics and emit a WARN log
                 # per failed batch so operators can trace and re-sync if needed.
                 # Cross-reference batch_breakdowns for duration / counts where present.
-                breakdown_by_idx = {
-                    bb.batch_num: bb for bb in result.batch_breakdowns
-                }
+                breakdown_by_idx = {bb.batch_num: bb for bb in result.batch_breakdowns}
                 for err in result.errors:
                     batch_idx = err.get("batch_num")
                     err_str = str(err.get("error", "unknown"))
-                    err_class = err.get("error_class") or type(err.get("error_obj", Exception())).__name__
+                    err_class = (
+                        err.get("error_class") or type(err.get("error_obj", Exception())).__name__
+                    )
                     bb = breakdown_by_idx.get(batch_idx) if batch_idx is not None else None
                     entry = {
                         "batch_index": batch_idx,
@@ -832,9 +830,7 @@ class SyncRunner:
                 # Falls back to `parent_count` only when the upsert was
                 # skipped (no messages) or failed (best-effort path).
                 if sync_type == "incremental":
-                    increment = (
-                        inserted_count if inserted_count is not None else parent_count
-                    )
+                    increment = inserted_count if inserted_count is not None else parent_count
                     await stores.mongodb.update_channel_sync_state(
                         channel_id=channel_id,
                         last_sync_ts=last_ts,

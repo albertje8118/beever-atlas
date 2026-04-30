@@ -705,9 +705,7 @@ class MongoDBStore:
     # Message Store (PR-A of oss-pipeline-and-wiki-redesign)
     # ------------------------------------------------------------------
 
-    async def upsert_channel_messages(
-        self, messages: list[ChannelMessage]
-    ) -> dict[str, int]:
+    async def upsert_channel_messages(self, messages: list[ChannelMessage]) -> dict[str, int]:
         """Bulk-upsert messages into ``channel_messages``.
 
         Idempotency contract: calling twice with the same ``(source_id,
@@ -812,9 +810,7 @@ class MongoDBStore:
             rows.append(doc)
         return rows
 
-    async def count_channel_messages_by_status(
-        self, channel_id: str
-    ) -> dict[str, int]:
+    async def count_channel_messages_by_status(self, channel_id: str) -> dict[str, int]:
         """Aggregate counts by ``extraction_status`` for one channel.
 
         Backs the future ``GET /api/channels/{id}/extraction-status`` endpoint

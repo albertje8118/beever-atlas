@@ -86,9 +86,7 @@ class _FakeImportedMessages:
     def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
         for k, v in query.items():
             if isinstance(v, dict):
-                if "$gt" in v and not (
-                    doc.get(k) is not None and doc.get(k) > v["$gt"]
-                ):
+                if "$gt" in v and not (doc.get(k) is not None and doc.get(k) > v["$gt"]):
                     return False
             else:
                 if doc.get(k) != v:
@@ -370,9 +368,7 @@ async def test_migration_filters_by_source_channel_id() -> None:
     store, _, channel_messages, _ = _make_store(rows)
 
     with patch.object(mig, "MongoDBStore", return_value=store):
-        summary = await mig.migrate(
-            dry_run=False, batch_size=10, source_channel_id="ch-1"
-        )
+        summary = await mig.migrate(dry_run=False, batch_size=10, source_channel_id="ch-1")
 
     assert summary["migrated"] == 2
     keys = {k for k in channel_messages._docs.keys()}
