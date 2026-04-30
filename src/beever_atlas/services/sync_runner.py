@@ -62,6 +62,7 @@ def _normalized_to_channel_messages(messages: list[Any]) -> list[ChannelMessage]
                     source_id=source_id,
                     channel_id=str(_read(m, "channel_id") or ""),
                     message_id=message_id,
+                    channel_name=str(_read(m, "channel_name") or ""),
                     timestamp=timestamp,
                     author=str(_read(m, "author") or ""),
                     author_name=str(_read(m, "author_name") or ""),
@@ -74,10 +75,17 @@ def _normalized_to_channel_messages(messages: list[Any]) -> list[ChannelMessage]
                     raw_metadata=dict(_read(m, "raw_metadata") or {}),
                 )
             )
-        except Exception:  # noqa: BLE001 — best-effort conversion
+        except Exception as exc:  # noqa: BLE001 — best-effort conversion
+            # PR-A.6.1 (review m1): preserve channel_id + source_id + exc class
+            # so an operator can grep the WARN log and pinpoint a stuck channel.
             logger.warning(
-                "_normalized_to_channel_messages: skipped message_id=%s due to validation error",
+                "_normalized_to_channel_messages: skipped source_id=%s "
+                "channel_id=%s message_id=%s exc=%s: %.200s",
+                source_id,
+                str(_read(m, "channel_id") or ""),
                 message_id,
+                type(exc).__name__,
+                str(exc),
             )
     return rows
 
@@ -677,6 +685,14 @@ class SyncRunner:
             # continues with inline extraction (existing behaviour). The
             # READ_FROM_MESSAGE_STORE flag (PR-A.4) is what makes UI reads
             # depend on the upsert succeeding; nothing here blocks on it yet.
+            #
+            # PR-A.6.1 (review C1): capture ``inserted_count`` so the
+            # cursor-advance branch increments ``total_synced_messages`` by
+            # NEW rows only. Pre-PR-0 the all-or-nothing predicate masked an
+            # inflation bug on re-sync; PR-0 removed the predicate, so we
+            # now plumb the upsert's inserted count back to keep the total
+            # honest.
+            inserted_count: int | None = None
             if messages:
                 try:
                     cm_rows = _normalized_to_channel_messages(messages)
@@ -684,12 +700,13 @@ class SyncRunner:
                         upsert_result = await stores.mongodb.upsert_channel_messages(
                             cm_rows
                         )
+                        inserted_count = int(upsert_result.get("inserted", 0))
                         logger.info(
                             "SyncRunner: channel_messages upsert job_id=%s channel=%s "
                             "inserted=%d matched=%d modified=%d",
                             job_id,
                             channel_id,
-                            upsert_result.get("inserted", 0),
+                            inserted_count,
                             upsert_result.get("matched", 0),
                             upsert_result.get("modified", 0),
                         )
@@ -808,13 +825,25 @@ class SyncRunner:
             # self-healing path arrives with PR-A (Message Store) + PR-B
             # (background extraction worker).
             if last_ts is not None:
+                # PR-A.6.1 (review C1): for incremental syncs, increment
+                # `total_synced_messages` by the upsert's NEW-rows count —
+                # not by `parent_count`, which double-counts on a manual
+                # re-sync that re-fetches messages already in the store.
+                # Falls back to `parent_count` only when the upsert was
+                # skipped (no messages) or failed (best-effort path).
                 if sync_type == "incremental":
+                    increment = (
+                        inserted_count if inserted_count is not None else parent_count
+                    )
                     await stores.mongodb.update_channel_sync_state(
                         channel_id=channel_id,
                         last_sync_ts=last_ts,
-                        increment=parent_count,
+                        increment=increment,
                     )
                 else:
+                    # Full syncs SET the total (replacing the old count) so
+                    # `parent_count` remains the right value here regardless
+                    # of upsert deltas.
                     await stores.mongodb.update_channel_sync_state(
                         channel_id=channel_id,
                         last_sync_ts=last_ts,

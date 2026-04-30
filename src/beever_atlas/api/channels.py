@@ -197,8 +197,11 @@ def _channel_message_row_to_response(
     are surfaced as top-level fields, ``timestamp`` is rendered as ISO 8601, and
     the API derives ``platform`` from the source row (``source_id`` for chat
     adapters maps 1:1 to platform name in PR-A.3's ``_normalized_to_channel_messages``).
-    ``channel_name`` is not stored on the row — fall back to ``channel_id`` so
-    the response shape stays identical.
+
+    PR-A.6.1 (review m6): ``channel_name`` is now persisted on the row by the
+    sync writer, so the response carries the platform's display name instead
+    of falling back to the opaque ``channel_id``. The ``channel_id`` fallback
+    remains for any row written before PR-A.6.1 ships (back-compat).
     """
     raw_metadata = row.get("raw_metadata") or {}
     ts = row.get("timestamp")

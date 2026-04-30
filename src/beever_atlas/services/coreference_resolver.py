@@ -59,14 +59,28 @@ async def fetch_channel_history(
             )
             .to_list(length=limit)
         )
-        return [
-            {
-                "author": r.get("author_name") or r.get("author") or "unknown",
-                "text": r.get("content") or r.get("text") or "",
-                "ts": r.get("message_id") or r.get("ts") or "",
-            }
-            for r in reversed(records)
-        ]
+        # PR-A.6.1 (review M1): the legacy ``raw_messages`` schema stored a
+        # Slack-shaped string in ``message_ts``; ``channel_messages`` stores
+        # a real ``timestamp`` datetime. Map back to an ISO string for the
+        # response so cross-platform consumers (Discord snowflake, Mattermost
+        # ID, etc.) keep timestamp-comparable semantics on the ``ts`` key.
+        out: list[dict[str, Any]] = []
+        for r in reversed(records):
+            ts_val = r.get("timestamp")
+            if hasattr(ts_val, "isoformat"):
+                ts_str = ts_val.isoformat()
+            elif ts_val is None:
+                ts_str = r.get("message_ts") or r.get("ts") or ""
+            else:
+                ts_str = str(ts_val)
+            out.append(
+                {
+                    "author": r.get("author_name") or r.get("author") or "unknown",
+                    "text": r.get("content") or r.get("text") or "",
+                    "ts": ts_str,
+                }
+            )
+        return out
     except Exception:
         logger.warning(
             "CoreferenceResolver: channel history unavailable for %s",

@@ -11,6 +11,37 @@ from beever_atlas.services import sync_runner as sync_runner_module
 from beever_atlas.services.batch_processor import BatchResult
 
 
+@pytest.fixture(autouse=True)
+def _reset_batch_processor_module_locks():
+    """PR-A.6.1 (review issue 17): re-bind ``batch_processor`` module-level
+    asyncio primitives to the current test's event loop.
+
+    ``services/batch_processor.py`` declares ``_limiter_lock`` and
+    ``_consecutive_503_lock`` as module-level ``asyncio.Lock()`` instances at
+    import time. Once pytest has imported the module under one event loop and
+    that loop is torn down (e.g. by an earlier ``tests/api/`` TestClient
+    fixture), subsequent tests in this file inherit dangling locks bound to a
+    closed loop — every PR-A.3 integration test then fails with
+    ``RuntimeError: Event loop is closed``.
+
+    PR-C will replace these module-globals with an injectable
+    ``CircuitBreaker``; until then, this autouse fixture re-creates them per
+    test so test ordering does not change behaviour. Restoring on teardown is
+    not required because the next test re-creates them anyway.
+    """
+    import beever_atlas.services.batch_processor as bp_mod
+
+    bp_mod._limiter_lock = asyncio.Lock()
+    bp_mod._consecutive_503_lock = asyncio.Lock()
+    bp_mod._consecutive_503_count = 0
+    # ``_provider_limiters`` caches ``AsyncLimiter`` instances per provider —
+    # each one is bound to whichever event loop created it. Clearing forces
+    # lazy re-creation on the current loop the next time the rate-limit code
+    # path runs.
+    bp_mod._provider_limiters = {}
+    yield
+
+
 @dataclass
 class _Msg:
     timestamp: datetime
@@ -418,6 +449,150 @@ async def test_run_sync_continues_when_message_store_upsert_fails(
         parent_count=1,
     )
     assert process_called["ran"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_sync_increments_total_by_inserted_count_not_parent_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-A.6.1 (review C1): on incremental sync, ``update_channel_sync_state``
+    SHALL increment ``total_synced_messages`` by the upsert's NEW-rows count —
+    NOT by ``parent_count`` — so a manual re-sync doesn't inflate the total.
+    """
+    calls: dict[str, object] = {}
+
+    class _Mongo:
+        async def upsert_channel_messages(self, rows) -> dict[str, int]:
+            # Simulate "5 messages re-fetched, only 2 are new" — the common
+            # case after a manual re-sync where most rows already exist.
+            return {"inserted": 2, "modified": 0, "matched": 3, "upserted_ids": 2}
+
+        async def complete_sync_job(self, **kwargs) -> None:
+            pass
+
+        async def log_activity(self, **kwargs) -> None:
+            pass
+
+        async def update_channel_sync_state(self, **kwargs) -> None:
+            calls["sync_state"] = kwargs
+
+    stores = SimpleNamespace(mongodb=_Mongo())
+    monkeypatch.setattr(sync_runner_module, "get_stores", lambda: stores)
+
+    async def _fake_resolve_policy(channel_id):
+        from types import SimpleNamespace as NS
+
+        return NS(ingestion=NS(), sync=NS(max_messages=100))
+
+    monkeypatch.setattr(
+        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        _fake_resolve_policy,
+        raising=False,
+    )
+
+    async def _process_messages(**kwargs) -> BatchResult:
+        return BatchResult(total_facts=0, total_entities=0, errors=[])
+
+    runner = sync_runner_module.SyncRunner()
+    runner._batch_processor = SimpleNamespace(process_messages=_process_messages)
+
+    msgs = [
+        SimpleNamespace(
+            platform="slack",
+            channel_id="C_INCR",
+            message_id=f"m{i}",
+            timestamp=datetime(2026, 4, 30, 10, i, tzinfo=UTC),
+            author="alice",
+            thread_id=None,
+            content=f"msg {i}",
+        )
+        for i in range(5)
+    ]
+
+    await runner._run_sync(
+        job_id="job-incr",
+        channel_id="C_INCR",
+        channel_name="general",
+        messages=msgs,
+        parent_count=5,
+        sync_type="incremental",
+    )
+
+    sync_state = calls.get("sync_state")
+    assert isinstance(sync_state, dict), "update_channel_sync_state was not called"
+    # Pre-PR-A.6.1: increment would be 5 (parent_count) → over-counts.
+    # Post-PR-A.6.1: increment is 2 (inserted count from upsert).
+    assert sync_state["increment"] == 2, (
+        f"expected increment=2 (inserted count), got {sync_state.get('increment')} — "
+        "PR-A.6.1 C1 regression: total_synced_messages would inflate on re-sync"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_sync_increment_falls_back_to_parent_count_on_upsert_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-A.6.1 (review C1) fallback contract: when the Mongo upsert fails
+    or is skipped, the cursor-advance increment falls back to ``parent_count``
+    so we preserve the pre-PR-A.6.1 behaviour for that branch.
+    """
+    calls: dict[str, object] = {}
+
+    class _Mongo:
+        async def upsert_channel_messages(self, rows) -> dict[str, int]:
+            raise RuntimeError("mongo down")
+
+        async def complete_sync_job(self, **kwargs) -> None:
+            pass
+
+        async def log_activity(self, **kwargs) -> None:
+            pass
+
+        async def update_channel_sync_state(self, **kwargs) -> None:
+            calls["sync_state"] = kwargs
+
+    stores = SimpleNamespace(mongodb=_Mongo())
+    monkeypatch.setattr(sync_runner_module, "get_stores", lambda: stores)
+
+    async def _fake_resolve_policy(channel_id):
+        from types import SimpleNamespace as NS
+
+        return NS(ingestion=NS(), sync=NS(max_messages=100))
+
+    monkeypatch.setattr(
+        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        _fake_resolve_policy,
+        raising=False,
+    )
+
+    async def _process_messages(**kwargs) -> BatchResult:
+        return BatchResult(total_facts=0, total_entities=0, errors=[])
+
+    runner = sync_runner_module.SyncRunner()
+    runner._batch_processor = SimpleNamespace(process_messages=_process_messages)
+
+    msg = SimpleNamespace(
+        platform="slack",
+        channel_id="C_FB",
+        message_id="m1",
+        timestamp=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        author="alice",
+        thread_id=None,
+        content="hi",
+    )
+    await runner._run_sync(
+        job_id="job-fb",
+        channel_id="C_FB",
+        channel_name="general",
+        messages=[msg],
+        parent_count=1,
+        sync_type="incremental",
+    )
+
+    sync_state = calls.get("sync_state")
+    assert isinstance(sync_state, dict)
+    # Upsert raised → inserted_count is None → fallback to parent_count=1.
+    assert sync_state["increment"] == 1
 
 
 @pytest.mark.asyncio

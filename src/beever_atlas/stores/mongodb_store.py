@@ -733,6 +733,7 @@ class MongoDBStore:
             mutable = {
                 k: doc[k]
                 for k in (
+                    "channel_name",
                     "timestamp",
                     "author",
                     "author_name",

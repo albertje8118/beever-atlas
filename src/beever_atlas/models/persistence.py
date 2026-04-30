@@ -116,6 +116,9 @@ class ChannelMessage(BaseModel):
     channel_id: str
     message_id: str
 
+    # ---- channel display (for UI label parity in dual-read path) ----------
+    channel_name: str = ""
+
     # ---- content -----------------------------------------------------------
     timestamp: datetime
     author: str = ""
