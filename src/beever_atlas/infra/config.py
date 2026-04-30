@@ -415,6 +415,19 @@ class Settings(BaseSettings):
         alias="BEEVER_LOADER_RAW_KEY_FALLBACK",
     )
 
+    # OSS pipeline + wiki redesign — PR-A.5 dual-read fallback.
+    # When True, ``GET /api/channels/{channel_id}/messages`` reads from the
+    # durable ``channel_messages`` collection (PR-A.1) populated by the sync
+    # runner (PR-A.3). Falls back to ``adapter.fetch_history`` when the store
+    # is empty for that channel OR a sync is currently running (so partial
+    # rows are not surfaced mid-flight). Default OFF — staging soak before
+    # flipping in production. See
+    # ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
+    # → "Dual-read fallback during migration".
+    read_from_message_store: bool = Field(
+        default=False, alias="READ_FROM_MESSAGE_STORE"
+    )
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared

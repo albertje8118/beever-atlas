@@ -15,6 +15,7 @@ from beever_atlas.adapters import ChannelInfo, get_adapter
 from beever_atlas.adapters.bridge import BridgeError, ChatBridgeAdapter
 from beever_atlas.infra.auth import Principal, require_user
 from beever_atlas.infra.channel_access import assert_channel_access
+from beever_atlas.infra.config import get_settings
 from beever_atlas.services.channel_discovery import (
     fetch_connection_channels,
     make_bridge_adapter,
@@ -183,6 +184,67 @@ def _apply_language_state(resp: ChannelResponse, state: Any | None) -> ChannelRe
             "primary_language_confidence": conf if conf is not None else None,
         }
     )
+
+
+def _channel_message_row_to_response(
+    row: dict[str, Any], channel_id: str
+) -> "MessageResponse":
+    """Map a ``channel_messages`` row dict back to the API ``MessageResponse``.
+
+    PR-A.5 — used by the dual-read path when ``READ_FROM_MESSAGE_STORE`` is ON.
+    Mirrors the field mapping the legacy adapter path applied at
+    ``api/channels.py:448-467``: ``raw_metadata.is_bot`` and ``raw_metadata.links``
+    are surfaced as top-level fields, ``timestamp`` is rendered as ISO 8601, and
+    the API derives ``platform`` from the source row (``source_id`` for chat
+    adapters maps 1:1 to platform name in PR-A.3's ``_normalized_to_channel_messages``).
+    ``channel_name`` is not stored on the row — fall back to ``channel_id`` so
+    the response shape stays identical.
+    """
+    raw_metadata = row.get("raw_metadata") or {}
+    ts = row.get("timestamp")
+    if isinstance(ts, datetime):
+        ts_iso = ts.isoformat()
+    else:
+        ts_iso = str(ts) if ts else ""
+    platform = row.get("source_id") or row.get("platform") or ""
+    return MessageResponse(
+        content=row.get("content", ""),
+        author=row.get("author", ""),
+        author_name=row.get("author_name", ""),
+        author_image=row.get("author_image") or None,
+        platform=str(platform),
+        channel_id=row.get("channel_id", channel_id),
+        channel_name=row.get("channel_name", channel_id),
+        message_id=row.get("message_id", ""),
+        timestamp=ts_iso,
+        thread_id=row.get("thread_id"),
+        attachments=row.get("attachments", []),
+        reactions=row.get("reactions", []),
+        reply_count=row.get("reply_count", 0),
+        is_bot=bool(row.get("is_bot", raw_metadata.get("is_bot", False))),
+        links=raw_metadata.get("links", []) or row.get("links", []),
+    )
+
+
+async def _compute_total_count(channel_id: str, adapter: Any | None) -> int | None:
+    """Compute ``total_count`` identically across the store and adapter paths.
+
+    Reads ``ChannelSyncState.total_synced_messages`` first; falls back to
+    ``adapter.fetch_message_count`` when no sync state is available AND an
+    adapter was supplied (the store-read path has no adapter to query). Keeps
+    the response shape identical between dual-read branches.
+    """
+    total_count: int | None = None
+    try:
+        stores = get_stores()
+        sync_state = await stores.mongodb.get_channel_sync_state(channel_id)
+        if sync_state is not None and sync_state.total_synced_messages:
+            total_count = sync_state.total_synced_messages
+    except RuntimeError:
+        pass
+    if total_count is None and adapter is not None and hasattr(adapter, "fetch_message_count"):
+        total_count = await adapter.fetch_message_count(channel_id)  # type: ignore[attr-defined]
+    return total_count
 
 
 async def _fetch_file_messages(
@@ -430,11 +492,67 @@ async def get_channel_messages(
             total = sync_state.total_synced_messages if sync_state else None
             return MessagesListResponse(messages=[], total_count=total)
 
-    adapter = await _resolve_adapter_for_channel(channel_id, connection_id)
-
     since_dt = None
     if since:
         since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+
+    # PR-A.5 — Dual-read fallback during migration. When the
+    # READ_FROM_MESSAGE_STORE flag is ON, prefer the durable
+    # ``channel_messages`` collection populated by the sync runner (PR-A.3)
+    # and fall back to ``adapter.fetch_history`` when (a) the store has zero
+    # rows for this channel, or (b) a sync is currently writing into it
+    # (status="running") — in either case the user might otherwise see
+    # partial data. See
+    # ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
+    # → "Dual-read fallback during migration".
+    if get_settings().read_from_message_store:
+        store_rows = await stores.mongodb.get_channel_messages(
+            channel_id,
+            limit=limit,
+            since=since_dt,
+            before=before,
+            order=order,
+        )
+        sync_job = None
+        try:
+            sync_job = await stores.mongodb.get_sync_status(channel_id)
+        except Exception:
+            logger.debug(
+                "Failed to fetch sync status for channel %s during dual-read",
+                channel_id,
+                exc_info=True,
+            )
+        sync_running = sync_job is not None and sync_job.status == "running"
+
+        if store_rows and not sync_running:
+            logger.info(
+                "channel_messages_read",
+                extra={
+                    "event": "channel_messages_read",
+                    "channel_id": channel_id,
+                    "row_count": len(store_rows),
+                },
+            )
+            response_messages = [
+                _channel_message_row_to_response(row, channel_id) for row in store_rows
+            ]
+            total_count = await _compute_total_count(channel_id, adapter=None)
+            return MessagesListResponse(
+                messages=response_messages,
+                total_count=total_count,
+            )
+
+        fallback_reason = "sync_in_progress" if sync_running else "empty_store"
+        logger.info(
+            "channel_messages_fallback",
+            extra={
+                "event": "channel_messages_fallback",
+                "reason": fallback_reason,
+                "channel_id": channel_id,
+            },
+        )
+
+    adapter = await _resolve_adapter_for_channel(channel_id, connection_id)
 
     try:
         messages = await adapter.fetch_history(
@@ -465,17 +583,7 @@ async def get_channel_messages(
         )
         for m in messages
     ]
-    total_count = None
-    try:
-        stores = get_stores()
-        sync_state = await stores.mongodb.get_channel_sync_state(channel_id)
-        if sync_state is not None and sync_state.total_synced_messages:
-            total_count = sync_state.total_synced_messages
-    except RuntimeError:
-        pass
-    # Fall back to live count from bridge if no sync data
-    if total_count is None and hasattr(adapter, "fetch_message_count"):
-        total_count = await adapter.fetch_message_count(channel_id)  # type: ignore[attr-defined]
+    total_count = await _compute_total_count(channel_id, adapter=adapter)
     return MessagesListResponse(
         messages=response_messages,
         total_count=total_count,
