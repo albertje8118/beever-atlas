@@ -18,10 +18,68 @@ from typing import Any, Awaitable, Callable
 from beever_atlas.adapters import get_adapter
 from beever_atlas.adapters.bridge import ChatBridgeAdapter
 from beever_atlas.infra.config import get_settings
+from beever_atlas.models.persistence import ChannelMessage
 from beever_atlas.services.batch_processor import BatchProcessor
 from beever_atlas.stores import get_stores
 
 logger = logging.getLogger(__name__)
+
+
+def _normalized_to_channel_messages(messages: list[Any]) -> list[ChannelMessage]:
+    """Convert ``NormalizedMessage``-shaped objects to ``ChannelMessage`` rows
+    for upsert into the durable Message Store (PR-A.3).
+
+    ``source_id`` is derived from the message's ``platform`` field — for chat
+    adapters that's "slack" | "discord" | "teams"; file imports use "file";
+    push sources (PR-D) set their own registered ``source_id`` directly on the
+    payload before reaching this helper.
+
+    Tolerates duck-typed dicts (used by the file importer) in addition to
+    dataclass-shaped messages so callers do not have to unify their types.
+    """
+    rows: list[ChannelMessage] = []
+    now = datetime.now(tz=UTC)
+
+    def _read(obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    for m in messages:
+        platform = str(_read(m, "platform") or "unknown")
+        source_id = str(_read(m, "source_id") or platform)
+        message_id = str(_read(m, "message_id") or "")
+        if not message_id:
+            # No identity to dedup on — skip (defensive; should never happen
+            # for well-formed adapter output).
+            continue
+        timestamp = _read(m, "timestamp")
+        if timestamp is None:
+            timestamp = now
+        try:
+            rows.append(
+                ChannelMessage(
+                    source_id=source_id,
+                    channel_id=str(_read(m, "channel_id") or ""),
+                    message_id=message_id,
+                    timestamp=timestamp,
+                    author=str(_read(m, "author") or ""),
+                    author_name=str(_read(m, "author_name") or ""),
+                    author_image=str(_read(m, "author_image") or ""),
+                    content=str(_read(m, "content") or ""),
+                    thread_id=_read(m, "thread_id"),
+                    attachments=list(_read(m, "attachments") or []),
+                    reactions=list(_read(m, "reactions") or []),
+                    reply_count=int(_read(m, "reply_count") or 0),
+                    raw_metadata=dict(_read(m, "raw_metadata") or {}),
+                )
+            )
+        except Exception:  # noqa: BLE001 — best-effort conversion
+            logger.warning(
+                "_normalized_to_channel_messages: skipped message_id=%s due to validation error",
+                message_id,
+            )
+    return rows
 
 
 def _coerce_since_timestamp(value: Any | None) -> datetime | None:
@@ -608,6 +666,42 @@ class SyncRunner:
             from beever_atlas.services.policy_resolver import resolve_effective_policy
 
             effective_policy = await resolve_effective_policy(channel_id)
+
+            # PR-A.3: Persist messages into the durable channel_messages
+            # collection BEFORE LLM extraction. The store is the source of
+            # truth from the moment a message is fetched — extraction failures
+            # (e.g. Gemini 503) no longer make the message disappear, and the
+            # future ExtractionWorker (PR-B) consumes pending rows from here.
+            #
+            # Best-effort: a Mongo-side failure logs a WARN and the sync
+            # continues with inline extraction (existing behaviour). The
+            # READ_FROM_MESSAGE_STORE flag (PR-A.4) is what makes UI reads
+            # depend on the upsert succeeding; nothing here blocks on it yet.
+            if messages:
+                try:
+                    cm_rows = _normalized_to_channel_messages(messages)
+                    if cm_rows:
+                        upsert_result = await stores.mongodb.upsert_channel_messages(
+                            cm_rows
+                        )
+                        logger.info(
+                            "SyncRunner: channel_messages upsert job_id=%s channel=%s "
+                            "inserted=%d matched=%d modified=%d",
+                            job_id,
+                            channel_id,
+                            upsert_result.get("inserted", 0),
+                            upsert_result.get("matched", 0),
+                            upsert_result.get("modified", 0),
+                        )
+                except Exception as exc:  # noqa: BLE001 — additive store
+                    logger.warning(
+                        "SyncRunner: channel_messages upsert failed job_id=%s "
+                        "channel=%s err=%s — sync continues without store; "
+                        "PR-A.4 dual-read fallback will keep UI working",
+                        job_id,
+                        channel_id,
+                        exc,
+                    )
 
             result = await self._batch_processor.process_messages(
                 messages=messages,

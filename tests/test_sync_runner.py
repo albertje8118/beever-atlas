@@ -212,6 +212,214 @@ async def test_run_sync_marks_completed_with_errors_when_batches_fail(
     assert activity["event_type"] == "sync_failed"
 
 
+def test_normalized_to_channel_messages_maps_required_fields() -> None:
+    """PR-A.3: NormalizedMessage-shaped objects convert to ChannelMessage rows
+    with source_id derived from ``platform``.
+
+    Spec: message-store > Per-message extraction state machine > New message
+    inserted on sync (status defaults to ``pending`` via ChannelMessage model).
+    """
+    from beever_atlas.services.sync_runner import _normalized_to_channel_messages
+
+    msgs = [
+        SimpleNamespace(
+            platform="slack",
+            channel_id="C123",
+            message_id="m1",
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            author="alice",
+            author_name="Alice",
+            author_image="",
+            content="hello",
+            thread_id=None,
+            attachments=[],
+            reactions=[],
+            reply_count=0,
+            raw_metadata={"is_bot": False},
+        )
+    ]
+    rows = _normalized_to_channel_messages(msgs)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.source_id == "slack"
+    assert row.channel_id == "C123"
+    assert row.message_id == "m1"
+    assert row.content == "hello"
+    assert row.extraction_status == "pending"
+    assert row.attempt_count == 0
+
+
+def test_normalized_to_channel_messages_skips_messages_without_identity() -> None:
+    """Defensive: messages missing message_id are skipped (no key to dedup on)."""
+    from beever_atlas.services.sync_runner import _normalized_to_channel_messages
+
+    msgs = [
+        SimpleNamespace(
+            platform="slack",
+            channel_id="C123",
+            message_id="",  # empty → skip
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            author="bob",
+            content="ghost",
+        )
+    ]
+    rows = _normalized_to_channel_messages(msgs)
+    assert rows == []
+
+
+def test_normalized_to_channel_messages_accepts_dict_messages() -> None:
+    """File importer hands dicts; converter must accept both shapes."""
+    from beever_atlas.services.sync_runner import _normalized_to_channel_messages
+
+    msgs = [
+        {
+            "platform": "file",
+            "channel_id": "csv-channel",
+            "message_id": "row-3",
+            "timestamp": datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            "author": "csv:alice",
+            "content": "imported text",
+        }
+    ]
+    rows = _normalized_to_channel_messages(msgs)
+    assert len(rows) == 1
+    assert rows[0].source_id == "file"
+    assert rows[0].channel_id == "csv-channel"
+
+
+@pytest.mark.asyncio
+async def test_run_sync_upserts_messages_to_message_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-A.3: ``_run_sync`` calls ``upsert_channel_messages`` on the store
+    BEFORE invoking BatchProcessor — the durable store is populated even if
+    extraction subsequently fails."""
+    upsert_called: dict[str, object] = {}
+
+    class _Mongo:
+        async def upsert_channel_messages(self, rows) -> dict[str, int]:
+            upsert_called["rows"] = rows
+            upsert_called["count"] = len(rows)
+            return {"inserted": len(rows), "modified": 0, "matched": 0, "upserted_ids": len(rows)}
+
+        async def complete_sync_job(self, **kwargs) -> None:
+            pass
+
+        async def log_activity(self, **kwargs) -> None:
+            pass
+
+        async def update_channel_sync_state(self, **kwargs) -> None:
+            pass
+
+    stores = SimpleNamespace(mongodb=_Mongo())
+    monkeypatch.setattr(sync_runner_module, "get_stores", lambda: stores)
+
+    async def _fake_resolve_policy(channel_id):
+        from types import SimpleNamespace as NS
+
+        return NS(ingestion=NS(), sync=NS(max_messages=100))
+
+    monkeypatch.setattr(
+        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        _fake_resolve_policy,
+        raising=False,
+    )
+
+    async def _process_messages(**kwargs) -> BatchResult:
+        return BatchResult(total_facts=1, total_entities=1, errors=[])
+
+    runner = sync_runner_module.SyncRunner()
+    runner._batch_processor = SimpleNamespace(process_messages=_process_messages)
+
+    msg = SimpleNamespace(
+        platform="slack",
+        channel_id="C789",
+        message_id="m_only",
+        timestamp=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+        author="carol",
+        thread_id=None,
+        content="hi",
+    )
+    await runner._run_sync(
+        job_id="job-3",
+        channel_id="C789",
+        channel_name="general",
+        messages=[msg],
+        parent_count=1,
+    )
+
+    assert upsert_called.get("count") == 1, "upsert_channel_messages was not called with the fetched message"
+    rows = upsert_called["rows"]
+    assert isinstance(rows, list) and len(rows) == 1
+    assert rows[0].source_id == "slack"
+    assert rows[0].channel_id == "C789"
+    assert rows[0].message_id == "m_only"
+
+
+@pytest.mark.asyncio
+async def test_run_sync_continues_when_message_store_upsert_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR-A.3 best-effort contract: a Mongo error during the upsert MUST NOT
+    fail the sync — extraction proceeds inline (existing path) until the
+    READ_FROM_MESSAGE_STORE flag flips in PR-A.4."""
+
+    class _Mongo:
+        async def upsert_channel_messages(self, rows) -> dict[str, int]:
+            raise RuntimeError("mongo down")
+
+        async def complete_sync_job(self, **kwargs) -> None:
+            pass
+
+        async def log_activity(self, **kwargs) -> None:
+            pass
+
+        async def update_channel_sync_state(self, **kwargs) -> None:
+            pass
+
+    stores = SimpleNamespace(mongodb=_Mongo())
+    monkeypatch.setattr(sync_runner_module, "get_stores", lambda: stores)
+
+    async def _fake_resolve_policy(channel_id):
+        from types import SimpleNamespace as NS
+
+        return NS(ingestion=NS(), sync=NS(max_messages=100))
+
+    monkeypatch.setattr(
+        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        _fake_resolve_policy,
+        raising=False,
+    )
+
+    process_called: dict[str, bool] = {"ran": False}
+
+    async def _process_messages(**kwargs) -> BatchResult:
+        process_called["ran"] = True
+        return BatchResult(total_facts=0, total_entities=0, errors=[])
+
+    runner = sync_runner_module.SyncRunner()
+    runner._batch_processor = SimpleNamespace(process_messages=_process_messages)
+
+    msg = SimpleNamespace(
+        platform="slack",
+        channel_id="C_FAIL",
+        message_id="m1",
+        timestamp=datetime(2026, 4, 29, 11, 0, tzinfo=UTC),
+        author="dan",
+        thread_id=None,
+        content="hi",
+    )
+    # Should NOT raise.
+    await runner._run_sync(
+        job_id="job-4",
+        channel_id="C_FAIL",
+        channel_name="general",
+        messages=[msg],
+        parent_count=1,
+    )
+    assert process_called["ran"] is True
+
+
 @pytest.mark.asyncio
 async def test_run_sync_advances_cursor_even_when_batches_fail(
     monkeypatch: pytest.MonkeyPatch,
