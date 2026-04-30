@@ -21,7 +21,7 @@ Convention: no `@pytest.mark.asyncio` decorators; pyproject sets
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from beever_atlas.models.persistence import ChannelMessage
@@ -39,6 +39,11 @@ class _FakeBulkResult:
         self.modified_count = modified
         self.matched_count = matched
         self.upserted_ids = {i: object() for i in range(upserted)}
+
+
+class _FakeUpdateResult:
+    def __init__(self, modified: int) -> None:
+        self.modified_count = modified
 
 
 class _FakeCursor:
@@ -110,24 +115,60 @@ class _FakeChannelMessages:
         for op in ops:
             filter_ = op._filter  # private attr, but UpdateOne exposes it
             update = op._doc
-            key = self._key(filter_)
-            existing = self._docs.get(key)
             set_part = update.get("$set", {})
             on_insert = update.get("$setOnInsert", {})
-            if existing is None:
-                self._docs[key] = {**on_insert, **set_part}
-                inserted += 1
-                upserted += 1
-            else:
+            inc_part = update.get("$inc", {})
+            # Filters with extra constraints (e.g. extraction_status:{$in:...})
+            # don't carry the full key tuple — fall back to scanning when the
+            # primary key fields aren't all present.
+            if (
+                "source_id" in filter_
+                and "channel_id" in filter_
+                and "message_id" in filter_
+                and not isinstance(filter_["source_id"], dict)
+                and not isinstance(filter_["channel_id"], dict)
+                and not isinstance(filter_["message_id"], dict)
+            ):
+                key = self._key(filter_)
+                existing = self._docs.get(key)
+                # Honor any extra constraints in the filter (e.g. status guard).
+                if existing is not None and not self._matches(existing, filter_):
+                    matched += 0
+                    existing = None
+                if existing is None and (on_insert or update.get("upsert")):
+                    if on_insert:
+                        self._docs[key] = {**on_insert, **set_part}
+                        inserted += 1
+                        upserted += 1
+                    continue
+                if existing is None:
+                    continue
                 matched += 1
-                # Only $set fields update; $setOnInsert is ignored on existing rows.
                 changed = False
                 for k, v in set_part.items():
                     if existing.get(k) != v:
                         existing[k] = v
                         changed = True
+                for k, v in inc_part.items():
+                    existing[k] = (existing.get(k) or 0) + v
+                    changed = True
                 if changed:
                     modified += 1
+                continue
+            # Fall-through for filter shapes without a full key — scan all docs.
+            for doc in self._docs.values():
+                if self._matches(doc, filter_):
+                    matched += 1
+                    changed = False
+                    for k, v in set_part.items():
+                        if doc.get(k) != v:
+                            doc[k] = v
+                            changed = True
+                    for k, v in inc_part.items():
+                        doc[k] = (doc.get(k) or 0) + v
+                        changed = True
+                    if changed:
+                        modified += 1
         return _FakeBulkResult(inserted, modified, matched, upserted)
 
     def find(self, query: dict[str, Any]) -> _FakeCursor:
@@ -151,6 +192,41 @@ class _FakeChannelMessages:
                 for k, v in update.get("$set", {}).items():
                     doc[k] = v
                 return
+
+    async def update_many(self, query: dict[str, Any], update: dict[str, Any]) -> _FakeUpdateResult:
+        modified = 0
+        for doc in self._docs.values():
+            if self._matches(doc, query):
+                for k, v in update.get("$set", {}).items():
+                    doc[k] = v
+                modified += 1
+        return _FakeUpdateResult(modified=modified)
+
+    async def find_one_and_update(
+        self,
+        query: dict[str, Any],
+        update: dict[str, Any],
+        return_document: Any = None,
+        sort: list[tuple[str, int]] | None = None,
+    ) -> dict[str, Any] | None:
+        # Sort the candidates first if a sort key is supplied — the
+        # production code uses ``sort=[("next_attempt_at", 1)]`` to drain
+        # the oldest-pending row first.
+        candidates = [(key, doc) for key, doc in self._docs.items() if self._matches(doc, query)]
+        if sort is not None:
+            for sort_key, sort_dir in reversed(sort):
+                candidates.sort(
+                    key=lambda kd: kd[1].get(sort_key) or "",
+                    reverse=(sort_dir == -1),
+                )
+        if not candidates:
+            return None
+        _, doc = candidates[0]
+        for k, v in update.get("$set", {}).items():
+            doc[k] = v
+        for k, v in update.get("$inc", {}).items():
+            doc[k] = (doc.get(k) or 0) + v
+        return {**doc}
 
     def aggregate(self, pipeline: list[dict[str, Any]]) -> _FakeAggregateCursor:
         rows: list[dict[str, Any]] = []
@@ -408,3 +484,175 @@ async def test_update_status_returns_false_when_message_missing() -> None:
         new_status="extracting",
     )
     assert ok is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ExtractionWorker primitives (PR-B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_claim_pending_returns_only_pending_rows_past_settle_window() -> None:
+    """``claim_pending_messages_for_extraction`` honors the 5s settle window."""
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    # Recent (within settle window) — must be skipped.
+    fake._docs[("slack", "C1", "m1")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m1",
+        "extraction_status": "pending",
+        "next_attempt_at": now,
+        "created_at": now,  # ← brand new, inside settle window
+        "timestamp": now,
+        "content": "fresh",
+    }
+    # Older — must be claimed.
+    fake._docs[("slack", "C1", "m2")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m2",
+        "extraction_status": "pending",
+        "next_attempt_at": now,
+        "created_at": now - timedelta(seconds=60),
+        "timestamp": now,
+        "content": "settled",
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, settle_seconds=5)
+    ids = [d["message_id"] for d in claimed]
+    assert ids == ["m2"]
+    # Status flipped to extracting.
+    assert fake._docs[("slack", "C1", "m2")]["extraction_status"] == "extracting"
+    # Recent row untouched.
+    assert fake._docs[("slack", "C1", "m1")]["extraction_status"] == "pending"
+
+
+async def test_claim_pending_skips_done_rows() -> None:
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "m1")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m1",
+        "extraction_status": "done",
+        "next_attempt_at": now,
+        "created_at": now - timedelta(minutes=5),
+    }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10)
+    assert claimed == []
+
+
+async def test_claim_pending_respects_batch_size_cap() -> None:
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    for i in range(7):
+        fake._docs[("slack", "C1", f"m{i}")] = {
+            "source_id": "slack",
+            "channel_id": "C1",
+            "message_id": f"m{i}",
+            "extraction_status": "pending",
+            "next_attempt_at": now,
+            "created_at": now - timedelta(minutes=1),
+            "timestamp": now,
+            "content": "x",
+        }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=3)
+    assert len(claimed) == 3
+
+
+async def test_claim_pending_filters_by_channel_id() -> None:
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    for ch in ("A", "B"):
+        fake._docs[("slack", ch, "m1")] = {
+            "source_id": "slack",
+            "channel_id": ch,
+            "message_id": "m1",
+            "extraction_status": "pending",
+            "next_attempt_at": now,
+            "created_at": now - timedelta(minutes=1),
+            "timestamp": now,
+            "content": "x",
+        }
+    claimed = await store.claim_pending_messages_for_extraction(batch_size=10, channel_id="A")
+    assert {d["channel_id"] for d in claimed} == {"A"}
+
+
+async def test_finalize_extraction_status_bulk_marks_done() -> None:
+    store, fake = _store_with_fake()
+    fake._docs[("slack", "C1", "m1")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m1",
+        "extraction_status": "extracting",
+    }
+    fake._docs[("slack", "C1", "m2")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m2",
+        "extraction_status": "extracting",
+    }
+    modified = await store.finalize_extraction_status_bulk(
+        keys=[("slack", "C1", "m1"), ("slack", "C1", "m2")],
+        new_status="done",
+    )
+    assert modified == 2
+    for key in (("slack", "C1", "m1"), ("slack", "C1", "m2")):
+        assert fake._docs[key]["extraction_status"] == "done"
+
+
+async def test_finalize_extraction_status_bulk_marks_failed_increments_attempt_count() -> None:
+    store, fake = _store_with_fake()
+    fake._docs[("slack", "C1", "m1")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "m1",
+        "extraction_status": "extracting",
+        "attempt_count": 0,
+    }
+    next_at = datetime.now(tz=UTC) + timedelta(seconds=30)
+    modified = await store.finalize_extraction_status_bulk(
+        keys=[("slack", "C1", "m1")],
+        new_status="failed",
+        last_error="503 UNAVAILABLE",
+        next_attempt_at=next_at,
+    )
+    assert modified == 1
+    doc = fake._docs[("slack", "C1", "m1")]
+    assert doc["extraction_status"] == "failed"
+    assert doc["attempt_count"] == 1
+    assert doc["last_error"] == "503 UNAVAILABLE"
+
+
+async def test_finalize_extraction_status_bulk_with_no_keys_returns_zero() -> None:
+    store, _ = _store_with_fake()
+    modified = await store.finalize_extraction_status_bulk(keys=[], new_status="done")
+    assert modified == 0
+
+
+async def test_sweep_stale_extracting_resets_old_rows_to_pending() -> None:
+    store, fake = _store_with_fake()
+    now = datetime.now(tz=UTC)
+    fake._docs[("slack", "C1", "old")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "old",
+        "extraction_status": "extracting",
+        "updated_at": now - timedelta(minutes=15),
+    }
+    fake._docs[("slack", "C1", "fresh")] = {
+        "source_id": "slack",
+        "channel_id": "C1",
+        "message_id": "fresh",
+        "extraction_status": "extracting",
+        "updated_at": now - timedelta(seconds=30),
+    }
+    swept = await store.sweep_stale_extracting(stale_seconds=600)
+    assert swept == 1
+    assert fake._docs[("slack", "C1", "old")]["extraction_status"] == "pending"
+    assert fake._docs[("slack", "C1", "fresh")]["extraction_status"] == "extracting"
+
+
+async def test_sweep_stale_extracting_returns_zero_when_no_stale_rows() -> None:
+    store, _ = _store_with_fake()
+    swept = await store.sweep_stale_extracting(stale_seconds=600)
+    assert swept == 0

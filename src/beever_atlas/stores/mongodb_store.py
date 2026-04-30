@@ -899,3 +899,159 @@ class MongoDBStore:
             {"$set": update},
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Message Store: ExtractionWorker primitives (PR-B)
+    # ------------------------------------------------------------------
+
+    async def claim_pending_messages_for_extraction(
+        self,
+        batch_size: int,
+        channel_id: str | None = None,
+        settle_seconds: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim up to ``batch_size`` pending messages.
+
+        Implements design D6 (extraction-worker spec): worker queries rows
+        whose ``extraction_status="pending"``, ``next_attempt_at <= now``,
+        and ``created_at < now - settle_seconds`` (the settle window gives
+        bulk upserts a chance to land before the worker scans), then flips
+        them to ``"extracting"`` via per-row ``find_one_and_update`` so two
+        worker instances cannot pick up the same row.
+
+        Returns the claimed documents (with ``_id`` stripped) — possibly
+        fewer than ``batch_size`` if the queue is short. Each returned
+        document carries the post-update state (status="extracting").
+
+        Per-row ``find_one_and_update`` is intentional rather than a single
+        ``update_many``: ``update_many`` is atomic at the document level but
+        does not return the matched documents, so the worker would still
+        need a follow-up read that races with other workers. The N
+        round-trips are acceptable at OSS scale (batch_size ≤ 32) and avoid
+        the race entirely.
+        """
+        from pymongo import ReturnDocument
+
+        now = datetime.now(tz=UTC)
+        filter_doc: dict[str, Any] = {
+            "extraction_status": "pending",
+            "next_attempt_at": {"$lte": now},
+            "created_at": {"$lt": now - timedelta(seconds=settle_seconds)},
+        }
+        if channel_id is not None:
+            filter_doc["channel_id"] = channel_id
+        update_doc = {
+            "$set": {
+                "extraction_status": "extracting",
+                "updated_at": now,
+            }
+        }
+        claimed: list[dict[str, Any]] = []
+        for _ in range(batch_size):
+            doc = await self._channel_messages.find_one_and_update(
+                filter_doc,
+                update_doc,
+                return_document=ReturnDocument.AFTER,
+                sort=[("next_attempt_at", 1)],
+            )
+            if doc is None:
+                break
+            doc.pop("_id", None)
+            claimed.append(doc)
+        return claimed
+
+    async def finalize_extraction_status_bulk(
+        self,
+        keys: list[tuple[str, str, str]],
+        new_status: str,
+        last_error: str | None = None,
+        next_attempt_at: datetime | None = None,
+    ) -> int:
+        """Bulk-transition many ``(source_id, channel_id, message_id)`` rows
+        to ``new_status`` (typically ``"done"`` or ``"failed"``).
+
+        Validates the source state via ``EXTRACTION_STATUS_TRANSITIONS`` —
+        only rows currently in a state from which ``new_status`` is
+        reachable are updated; mismatched rows are silently skipped (the
+        worker logs a warning per skip via the per-row helper). Returns
+        the count of rows actually mutated. ``attempt_count`` is
+        incremented when transitioning to ``"failed"``.
+
+        Used by :class:`ExtractionWorker` after a batch completes so the N
+        per-row ``update_one`` round-trips collapse into a single
+        ``bulk_write``.
+        """
+        if not keys:
+            return 0
+        from pymongo import UpdateOne
+
+        # Determine the set of allowed source states for this transition.
+        allowed_from = {
+            from_state
+            for from_state, allowed in EXTRACTION_STATUS_TRANSITIONS.items()
+            if new_status in allowed or new_status == from_state
+        }
+        if not allowed_from:
+            logger.warning(
+                "channel_messages: bulk transition to %r has no valid source state",
+                new_status,
+            )
+            return 0
+        now = datetime.now(tz=UTC)
+        ops: list[UpdateOne] = []
+        for source_id, channel_id, message_id in keys:
+            update_set: dict[str, Any] = {
+                "extraction_status": new_status,
+                "updated_at": now,
+            }
+            if last_error is not None:
+                update_set["last_error"] = last_error
+            if next_attempt_at is not None:
+                update_set["next_attempt_at"] = next_attempt_at
+            update: dict[str, Any] = {"$set": update_set}
+            if new_status == "failed":
+                update["$inc"] = {"attempt_count": 1}
+            ops.append(
+                UpdateOne(
+                    {
+                        "source_id": source_id,
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                        "extraction_status": {"$in": list(allowed_from)},
+                    },
+                    update,
+                )
+            )
+        result = await self._channel_messages.bulk_write(ops, ordered=False)
+        return result.modified_count
+
+    async def sweep_stale_extracting(self, stale_seconds: int = 600) -> int:
+        """Reset rows stuck in ``"extracting"`` for more than ``stale_seconds``
+        back to ``"pending"`` so a future tick can re-claim them.
+
+        Recovery path for worker crashes mid-batch (design D6). Default
+        10-minute stale window is conservative — extraction batches
+        typically complete in 30-90 seconds.
+        """
+        now = datetime.now(tz=UTC)
+        threshold = now - timedelta(seconds=stale_seconds)
+        result = await self._channel_messages.update_many(
+            {
+                "extraction_status": "extracting",
+                "updated_at": {"$lt": threshold},
+            },
+            {
+                "$set": {
+                    "extraction_status": "pending",
+                    "updated_at": now,
+                    "next_attempt_at": now,
+                }
+            },
+        )
+        if result.modified_count:
+            logger.warning(
+                "ExtractionWorker: swept %d stale-extracting rows older than %ds",
+                result.modified_count,
+                stale_seconds,
+            )
+        return result.modified_count
