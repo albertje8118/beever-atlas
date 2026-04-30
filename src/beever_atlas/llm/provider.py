@@ -60,6 +60,14 @@ class LLMProvider:
 
         Priority: MongoDB override → default map → LLM_FAST_MODEL env var.
         Returns a string (Gemini) or LiteLlm instance (Ollama).
+
+        PR-C: when the global CircuitBreaker is open AND
+        ``LLM_FAILOVER_ENABLED`` is True, the resolved model is
+        re-mapped through ``llm_fallback_model_map`` so a subsequent
+        call uses a smaller / different model while the primary
+        recovers. Facts written along this path are tagged
+        ``extracted_by_fallback=true`` (handled by the persister, not
+        here — this method is the seam, not the propagator).
         """
         # 1. Check MongoDB overrides
         model_str = self._agent_overrides.get(agent_name)
@@ -71,6 +79,30 @@ class LLMProvider:
             model_str = self._settings.llm_fast_model
 
         model_str = self._resolve_alias(model_str, f"agent={agent_name}")
+
+        # PR-C: provider failover seam.
+        if getattr(self._settings, "llm_failover_enabled", False):
+            try:
+                from beever_atlas.services.circuit_breaker import get_circuit_breaker
+
+                breaker = get_circuit_breaker()
+                if breaker.is_open():
+                    fallback_map = getattr(self._settings, "llm_fallback_model_map", {})
+                    fallback = fallback_map.get(model_str)
+                    if fallback:
+                        logger.warning(
+                            "LLMProvider: breaker open — failing over agent=%s "
+                            "primary=%s fallback=%s",
+                            agent_name,
+                            model_str,
+                            fallback,
+                        )
+                        model_str = fallback
+            except Exception as exc:  # noqa: BLE001 — failover must not crash resolution
+                logger.warning(
+                    "LLMProvider: failover seam raised, using primary: %s",
+                    exc,
+                )
 
         # Ollama fallback: if model is Ollama but service is unreachable
         if is_ollama_model(model_str):

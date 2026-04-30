@@ -13,7 +13,7 @@ import logging
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import json
@@ -49,9 +49,10 @@ async def _get_limiter(provider: str) -> AsyncLimiter:
     return _provider_limiters[provider]
 
 
-# ── Provider outage circuit breaker ──────────────────────────────────────────
-_consecutive_503_count: int = 0
-_consecutive_503_lock: asyncio.Lock = asyncio.Lock()
+# PR-C: ``_consecutive_503_count`` and ``_consecutive_503_lock`` removed —
+# the breaker now lives in ``services/circuit_breaker.py`` and is injected
+# via :class:`BatchProcessor.__init__`. Tests that previously depended on
+# resetting these module-globals can drop their workaround fixture.
 
 # ContextVar so callbacks in workers 2/3 can read the current batch index.
 _batch_idx_var: contextvars.ContextVar[int] = contextvars.ContextVar("batch_idx", default=0)
@@ -216,11 +217,21 @@ class BatchResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
 
 
+if TYPE_CHECKING:
+    from beever_atlas.services.circuit_breaker import CircuitBreaker
+
+
 class BatchProcessor:
     """Chunks messages into batches and runs each through the ingestion pipeline."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, breaker: "CircuitBreaker | None" = None) -> None:
+        # PR-C: inject the CircuitBreaker so test fixtures can hand in a
+        # fresh instance and there are no module-globals to bleed across
+        # tests. Default singleton is shared with ExtractionWorker so a
+        # 503 storm trips one breaker that both call sites observe.
+        from beever_atlas.services.circuit_breaker import get_circuit_breaker
+
+        self._breaker = breaker or get_circuit_breaker()
 
     async def process_messages(
         self,
@@ -315,22 +326,22 @@ class BatchProcessor:
                     _semaphore_wait_s,
                 )
                 # ── Circuit breaker: fail fast if provider is down ────────────
-                global _consecutive_503_count
-                async with _consecutive_503_lock:
-                    _current_count = _consecutive_503_count
-                _threshold = settings.llm_outage_breaker_threshold
-                try:
-                    _breaker_tripped = _current_count >= _threshold
-                except TypeError:
-                    _breaker_tripped = False
-                if _breaker_tripped:
+                # PR-C: replaced module-globals with injected breaker. The
+                # half-open recovery path is automatic — if the breaker is
+                # open but the cooldown has elapsed, allow() transitions to
+                # half_open and returns True, letting one probe through.
+                if not await self._breaker.allow():
+                    snapshot = self._breaker.snapshot()
                     logger.error(
-                        "BatchProcessor: provider outage breaker tripped count=%d threshold=%d",
-                        _current_count,
-                        _threshold,
+                        "BatchProcessor: provider outage breaker tripped "
+                        "consecutive=%d threshold=%d state=%s",
+                        snapshot.consecutive_failures,
+                        snapshot.threshold,
+                        snapshot.state,
                     )
                     raise ProviderOutageError(
-                        f"Provider outage: {_current_count} consecutive Gemini 5xx failures"
+                        f"Provider outage: {snapshot.consecutive_failures} "
+                        f"consecutive Gemini 5xx failures"
                     )
                 # ─────────────────────────────────────────────────────────────
 
@@ -1182,8 +1193,7 @@ class BatchProcessor:
                                 exc_info=False,
                             )
                         # Reset breaker on any successful batch
-                        async with _consecutive_503_lock:
-                            _consecutive_503_count = 0
+                        await self._breaker.record_success()
                         break  # success
                     except (
                         ServerError,
@@ -1210,8 +1220,7 @@ class BatchProcessor:
                             # Sleep and retry happen at the top of the next loop iteration
                         else:
                             # Terminal failure after all retries — increment breaker counter once
-                            async with _consecutive_503_lock:
-                                _consecutive_503_count += 1
+                            await self._breaker.record_failure(exc)
                             raise
                     except Exception as exc:
                         # Catch ValidationError (truncated LLM JSON) and similar parse failures.

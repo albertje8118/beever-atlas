@@ -20,10 +20,13 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from beever_atlas.adapters.base import NormalizedMessage
 from beever_atlas.services.batch_processor import BatchProcessor
+
+if TYPE_CHECKING:
+    from beever_atlas.services.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +129,17 @@ class ExtractionWorker:
         semaphore_size: int | None = None,
         settle_seconds: int = 5,
         stale_seconds: int = 600,
+        breaker: "CircuitBreaker | None" = None,
     ) -> None:
-        self._batch_processor = batch_processor or BatchProcessor()
+        # PR-C: pass the same CircuitBreaker singleton into the
+        # BatchProcessor so the worker path and the inline path share
+        # one breaker — a 503 storm against the worker trips the same
+        # breaker that the inline path observes.
+        from beever_atlas.services.circuit_breaker import get_circuit_breaker
+
+        breaker = breaker or get_circuit_breaker()
+        self._breaker = breaker
+        self._batch_processor = batch_processor or BatchProcessor(breaker=breaker)
         # Lazily initialised on first tick so the constructor stays
         # event-loop-free and importable from non-async test fixtures.
         self._semaphore_size = semaphore_size

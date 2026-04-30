@@ -13,32 +13,23 @@ from beever_atlas.services.batch_processor import BatchResult
 
 @pytest.fixture(autouse=True)
 def _reset_batch_processor_module_locks():
-    """PR-A.6.1 (review issue 17): re-bind ``batch_processor`` module-level
-    asyncio primitives to the current test's event loop.
+    """Reset event-loop-bound module-level primitives between tests.
 
-    ``services/batch_processor.py`` declares ``_limiter_lock`` and
-    ``_consecutive_503_lock`` as module-level ``asyncio.Lock()`` instances at
-    import time. Once pytest has imported the module under one event loop and
-    that loop is torn down (e.g. by an earlier ``tests/api/`` TestClient
-    fixture), subsequent tests in this file inherit dangling locks bound to a
-    closed loop — every PR-A.3 integration test then fails with
-    ``RuntimeError: Event loop is closed``.
-
-    PR-C will replace these module-globals with an injectable
-    ``CircuitBreaker``; until then, this autouse fixture re-creates them per
-    test so test ordering does not change behaviour. Restoring on teardown is
-    not required because the next test re-creates them anyway.
+    PR-C removed ``_consecutive_503_count`` / ``_consecutive_503_lock`` —
+    the breaker is now an injected :class:`CircuitBreaker`. The remaining
+    module-globals (``_limiter_lock`` rate-limiter lock and
+    ``_provider_limiters`` AsyncLimiter cache) still bind to whichever
+    event loop first imported the module, so this fixture re-creates
+    them per test to prevent ``Event loop is closed`` cascades when the
+    sync_runner tests run after a TestClient-based test torn down its
+    loop. Also resets the breaker singleton so each test starts closed.
     """
     import beever_atlas.services.batch_processor as bp_mod
+    from beever_atlas.services.circuit_breaker import reset_circuit_breaker_for_tests
 
     bp_mod._limiter_lock = asyncio.Lock()
-    bp_mod._consecutive_503_lock = asyncio.Lock()
-    bp_mod._consecutive_503_count = 0
-    # ``_provider_limiters`` caches ``AsyncLimiter`` instances per provider —
-    # each one is bound to whichever event loop created it. Clearing forces
-    # lazy re-creation on the current loop the next time the rate-limit code
-    # path runs.
     bp_mod._provider_limiters = {}
+    reset_circuit_breaker_for_tests()
     yield
 
 
