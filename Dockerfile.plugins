@@ -1,0 +1,41 @@
+# Extends the standard beever-atlas image with the chatgpt_copilot plugin.
+#
+# Build:
+#   docker build -f Dockerfile.plugins -t beever-atlas-with-plugins .
+#
+# Run:
+#   docker run -e GITHUB_TOKEN=ghp_... -p 8000:8000 beever-atlas-with-plugins
+
+FROM python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286 AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.7.13@sha256:6c1e19020ec221986a210027040044a5df8de762eb36d5240e382bc41d7a9043 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY src/ src/
+COPY plugins/ plugins/
+COPY start_with_plugins.py ./
+
+RUN uv sync --frozen --no-dev
+
+FROM python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286
+
+WORKDIR /app
+
+RUN addgroup --system --gid 10001 app && \
+    adduser --system --uid 10001 --ingroup app --no-create-home app && \
+    chown app:app /app
+
+COPY --chown=app:app --from=builder /app/.venv /app/.venv
+COPY --chown=app:app --from=builder /app/src /app/src
+COPY --chown=app:app --from=builder /app/plugins /app/plugins
+COPY --chown=app:app --from=builder /app/start_with_plugins.py /app/start_with_plugins.py
+COPY --chown=app:app --from=builder /app/pyproject.toml /app/pyproject.toml
+
+ENV PATH="/app/.venv/bin:$PATH"
+USER app
+
+EXPOSE 8000
+
+CMD ["uvicorn", "start_with_plugins:app", "--host", "0.0.0.0", "--port", "8000"]

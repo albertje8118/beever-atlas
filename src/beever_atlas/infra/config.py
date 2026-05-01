@@ -103,11 +103,6 @@ class Settings(BaseSettings):
 
     # LLM providers
     google_api_key: str = Field(default="")
-    # GitHub token for GitHub Models / GitHub Copilot API (optional).
-    # Required when using model strings prefixed with "github/" (e.g. "github/gpt-4o-mini").
-    # Obtain from https://github.com/settings/tokens — no special scopes needed for public
-    # GitHub Models; Copilot API access requires an active Copilot subscription.
-    github_token: str = Field(default="", alias="GITHUB_TOKEN")
 
     # External services
     jina_api_key: str = Field(default="")

@@ -1,24 +1,25 @@
 """Import ChatGPT conversation history into beever-atlas.
 
-Reads ``chatgpt_history.json`` (produced by ``fetch_chatgpt.py``) and either
+Reads ``chatgpt_history.json`` (produced by the fetch script) and either
 shows a dry-run preview or ingests conversations into the full beever-atlas
 RAG pipeline (Weaviate + Neo4j + MongoDB).
 
-Usage:
-    # Preview what would be imported (no writes, no API keys needed):
-    uv run python scripts/import_chatgpt_history.py
+Usage::
 
-    # Import all conversations (requires GOOGLE_API_KEY + JINA_API_KEY + stores):
-    uv run python scripts/import_chatgpt_history.py --ingest
+    # Preview what would be imported (no writes, no API keys needed):
+    uv run python -m plugins.chatgpt_copilot.chatgpt.importer
+
+    # Import all conversations (requires GOOGLE_API_KEY + JINA_API_KEY + stores running):
+    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest
 
     # Import a single conversation by ID or partial title match:
-    uv run python scripts/import_chatgpt_history.py --ingest --conversation "LiPo Battery"
+    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest --conversation "LiPo Battery"
 
     # Limit to the N most recent conversations:
-    uv run python scripts/import_chatgpt_history.py --ingest --limit 5
+    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest --limit 5
 
     # Use a different JSON file:
-    uv run python scripts/import_chatgpt_history.py --file path/to/history.json
+    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --file path/to/history.json
 """
 
 from __future__ import annotations
@@ -32,17 +33,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Load .env before any project imports
-from dotenv import load_dotenv
+# Project root is 3 levels above: plugins/chatgpt_copilot/chatgpt/importer.py
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+# Load .env before any project imports
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(_PROJECT_ROOT / ".env")
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_HISTORY_FILE = Path(__file__).resolve().parents[1] / "chatgpt_history.json"
+DEFAULT_HISTORY_FILE = _PROJECT_ROOT / "chatgpt_history.json"
 
-# ChatGPT conversations are treated as a special platform channel.
 CHATGPT_PLATFORM = "chatgpt"
 CHATGPT_AUTHOR_USER = "human"
 CHATGPT_AUTHOR_AI = "chatgpt"
@@ -54,7 +57,6 @@ CHATGPT_AUTHOR_AI = "chatgpt"
 
 
 def _parse_timestamp(ts_str: str | None, fallback: datetime) -> datetime:
-    """Parse an ISO-8601 timestamp string, falling back to ``fallback``."""
     if not ts_str:
         return fallback
     try:
@@ -67,58 +69,45 @@ def _parse_timestamp(ts_str: str | None, fallback: datetime) -> datetime:
 
 
 def _conv_to_messages(conv: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert a single ChatGPT conversation dict into pipeline-ready message dicts.
-
-    Each conversation becomes a virtual "channel". Messages alternate between
-    the human user and the ChatGPT assistant.
-    """
+    """Convert a single ChatGPT conversation dict into pipeline-ready message dicts."""
     conv_id = conv.get("id", str(uuid.uuid4()))
     title = conv.get("title") or "Untitled ChatGPT conversation"
     created_dt = _parse_timestamp(conv.get("created"), datetime.now(tz=timezone.utc))
     updated_dt = _parse_timestamp(conv.get("updated"), created_dt)
 
     messages = []
-    raw_msgs: list[dict[str, Any]] = conv.get("messages", [])
-
-    # Synthesise incrementing timestamps so ordering is preserved.
-    # Step one second per message, anchored at the conversation's created_at.
-    for i, msg in enumerate(raw_msgs):
+    for i, msg in enumerate(conv.get("messages", [])):
         role = msg.get("role", "unknown")
         text = (msg.get("text") or "").strip()
-        if not text:
-            continue
-        if role == "system":
+        if not text or role == "system":
             continue
 
         author = CHATGPT_AUTHOR_USER if role == "user" else CHATGPT_AUTHOR_AI
-        author_name = "User" if role == "user" else "ChatGPT"
         ts_epoch = created_dt.timestamp() + i
         ts_str = f"{int(ts_epoch)}.{i:03d}"
 
-        messages.append(
-            {
-                "content": text,
-                "text": text,
-                "author": author,
-                "author_name": author_name,
-                "platform": CHATGPT_PLATFORM,
-                "channel_id": conv_id,
-                "channel_name": title,
-                "message_id": ts_str,
-                "ts": ts_str,
-                "timestamp": datetime.fromtimestamp(ts_epoch, tz=timezone.utc).isoformat(),
-                "thread_id": None,
-                "thread_ts": None,
-                "attachments": [],
-                "reactions": [],
-                "reply_count": 0,
-                "raw_metadata": {
-                    "chatgpt_conversation_id": conv_id,
-                    "chatgpt_conversation_title": title,
-                    "chatgpt_updated": updated_dt.isoformat(),
-                },
-            }
-        )
+        messages.append({
+            "content": text,
+            "text": text,
+            "author": author,
+            "author_name": "User" if role == "user" else "ChatGPT",
+            "platform": CHATGPT_PLATFORM,
+            "channel_id": conv_id,
+            "channel_name": title,
+            "message_id": ts_str,
+            "ts": ts_str,
+            "timestamp": datetime.fromtimestamp(ts_epoch, tz=timezone.utc).isoformat(),
+            "thread_id": None,
+            "thread_ts": None,
+            "attachments": [],
+            "reactions": [],
+            "reply_count": 0,
+            "raw_metadata": {
+                "chatgpt_conversation_id": conv_id,
+                "chatgpt_conversation_title": title,
+                "chatgpt_updated": updated_dt.isoformat(),
+            },
+        })
 
     return messages
 
@@ -129,7 +118,6 @@ def _conv_to_messages(conv: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _show_dry_run(conversations: list[dict[str, Any]], limit: int | None) -> None:
-    """Print a formatted preview of what would be imported."""
     subset = conversations[:limit] if limit else conversations
     total_msgs = sum(len(c.get("messages", [])) for c in subset)
 
@@ -170,7 +158,6 @@ async def _ingest(
     limit: int | None,
     conversation_filter: str | None,
 ) -> None:
-    """Run the actual ingestion pipeline for each conversation."""
     from beever_atlas.infra.config import get_settings
     from beever_atlas.llm import init_llm_provider
     from beever_atlas.services.batch_processor import BatchProcessor
@@ -178,7 +165,6 @@ async def _ingest(
 
     settings = get_settings()
 
-    # Filter conversations
     subset = conversations
     if conversation_filter:
         needle = conversation_filter.lower()
@@ -197,17 +183,13 @@ async def _ingest(
     print(f"{'─' * 70}")
     print(f"  Conversations to import : {len(subset)}")
 
-    # Boot stores
     stores = StoreClients.from_settings(settings)
     init_stores(stores)
     await stores.startup()
-
-    # Boot LLM provider
     init_llm_provider(settings)
 
     processor = BatchProcessor()
     sync_job_id = f"chatgpt-import-{uuid.uuid4().hex[:8]}"
-
     total_facts = 0
     total_entities = 0
 
@@ -221,14 +203,12 @@ async def _ingest(
             continue
 
         print(f"  [{i}/{len(subset)}] Ingesting '{title[:55]}' ({len(pipeline_msgs)} msgs)…")
-
         result = await processor.process_messages(
             messages=pipeline_msgs,
             channel_id=conv_id,
             channel_name=title,
             sync_job_id=f"{sync_job_id}-{i}",
         )
-
         total_facts += result.total_facts
         total_entities += result.total_entities
         print(
@@ -237,7 +217,6 @@ async def _ingest(
         )
 
     await stores.shutdown()
-
     print()
     print(f"{'─' * 70}")
     print(f"  Done. Total facts: {total_facts}, Total entities: {total_entities}")
@@ -250,7 +229,9 @@ async def _ingest(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--file",
         default=str(DEFAULT_HISTORY_FILE),
@@ -279,13 +260,12 @@ def main() -> None:
     if not history_path.exists():
         raise SystemExit(
             f"History file not found: {history_path}\n"
-            "Run fetch_chatgpt.py first to generate it."
+            "Run the fetch script first: python -m plugins.chatgpt_copilot.chatgpt.fetch"
         )
 
     conversations: list[dict[str, Any]] = json.loads(history_path.read_text(encoding="utf-8"))
     print(f"Loaded {len(conversations)} conversations from {history_path.name}")
 
-    # Apply conversation filter in dry-run too (for preview of a specific conv)
     if args.conversation:
         needle = args.conversation.lower()
         conversations = [

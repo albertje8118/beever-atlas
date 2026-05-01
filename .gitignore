@@ -1,3 +1,7 @@
+# Plugin artifacts (sensitive / ephemeral)
+chatgpt_history.json
+chatgpt_token.txt
+
 # Node.js
 node_modules/
 dist/
