@@ -3,21 +3,23 @@
 Use this instead of pointing uvicorn directly at ``beever_atlas.server.app:app``
 to enable the plugins in ``plugins/``.
 
-Development (auto-reload)::
-
-    uvicorn start_with_plugins:app --reload --host 0.0.0.0 --port 8000
-
-Production::
-
-    uvicorn start_with_plugins:app --host 0.0.0.0 --port 8000
-
-With uv::
+Development (auto-reload) — recommended::
 
     uv run uvicorn start_with_plugins:app --reload
 
+Or activate the project venv first, then use plain uvicorn::
+
+    .venv\\Scripts\\activate   # Windows
+    source .venv/bin/activate  # Linux / macOS
+    uvicorn start_with_plugins:app --reload
+
+Production::
+
+    uv run uvicorn start_with_plugins:app --host 0.0.0.0 --port 8000
+
 Docker (override the default CMD)::
 
-    docker run -e GITHUB_TOKEN=... <image> \\
+    docker run -e COPILOT_GITHUB_TOKEN=... <image> \\
         uvicorn start_with_plugins:app --host 0.0.0.0 --port 8000
 
 Notes
@@ -25,8 +27,10 @@ Notes
 * ``load_plugins()`` runs at module import time, so it executes once per
   worker/reload process — correctly patching the modules before the app is
   imported.
-* The ``plugins/`` directory is importable because uvicorn adds the CWD
-  (project root) to ``sys.path`` before importing this module.
+* The ``plugins/`` directory is importable because this file adds the project
+  root to ``sys.path``.
+* ``beever_atlas`` is installed as an editable package inside the project
+  ``.venv``.  Always run via ``uv run`` or with the venv activated.
 """
 
 from __future__ import annotations
@@ -40,7 +44,15 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Load .env BEFORE plugin activation so env vars (e.g. GITHUB_TOKEN) are
+# Also add src/ so beever_atlas is importable when the package is not installed
+# in the active Python environment (e.g. running with a system uvicorn while
+# deps live in .venv).  uv run / venv activation is still preferred because
+# third-party dependencies (fastapi, weaviate-client, etc.) must also be present.
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+# Load .env BEFORE plugin activation so env vars (e.g. COPILOT_GITHUB_TOKEN) are
 # available during patching.  app.py also calls load_dotenv(), which is
 # idempotent, so double-loading is harmless.
 from dotenv import load_dotenv  # noqa: E402
