@@ -10,6 +10,7 @@ from beever_atlas.infra.config import Settings
 from beever_atlas.llm.model_resolver import (
     AGENT_NAMES,
     DEFAULT_AGENT_MODELS,
+    is_github_model,
     is_ollama_model,
     resolve_model_object,
 )

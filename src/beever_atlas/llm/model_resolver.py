@@ -62,6 +62,21 @@ KNOWN_OLLAMA_MODELS: list[str] = [
     "gemma4:e4b",
 ]
 
+# Known GitHub Models (via GitHub token) — see https://github.com/marketplace/models
+# Use the "github/<model-name>" prefix (litellm routing).
+KNOWN_GITHUB_MODELS: list[str] = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o1",
+    "o1-mini",
+    "o3-mini",
+    "Meta-Llama-3.1-405B-Instruct",
+    "Meta-Llama-3.1-70B-Instruct",
+    "Mistral-large-2407",
+    "Phi-3.5-MoE-instruct",
+    "claude-3-5-sonnet",
+]
+
 # Presets for quick configuration
 MODEL_PRESETS: dict[str, dict[str, str]] = {
     "balanced": DEFAULT_AGENT_MODELS.copy(),
@@ -90,6 +105,7 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "minimax",
     "cohere",
     "ollama_chat",
+    "github",
     "vertex_ai",
     "bedrock",
 )
@@ -160,6 +176,12 @@ def resolve_model_object(
             return model_string[len("gemini/") :]
         if model_string.startswith("gemini-"):
             return model_string  # already bare Gemini
+        if model_string.startswith("github/"):
+            if settings.github_token:
+                os.environ.setdefault("GITHUB_TOKEN", settings.github_token)
+            from google.adk.models.lite_llm import LiteLlm
+
+            return LiteLlm(model=model_string, **extra)
         if "/" in model_string:
             # Any non-Gemini provider prefix → LiteLlm wrap. The flag only
             # disables LiteLlm for Gemini; OpenAI/Anthropic/Mistral/etc.
@@ -190,6 +212,11 @@ def resolve_model_object(
 def is_ollama_model(model_string: str) -> bool:
     """Check if a model string refers to an Ollama local model."""
     return model_string.startswith("ollama_chat/")
+
+
+def is_github_model(model_string: str) -> bool:
+    """Check if a model string refers to a GitHub Models / Copilot model."""
+    return model_string.startswith("github/")
 
 
 # Per-agent capability requirements. The dispatch + UI validation gate
