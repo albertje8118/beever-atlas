@@ -229,4 +229,73 @@ async def delete_source(source_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# ---------------------------------------------------------------------------
+# Worker observability metrics (production-wiring §20)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/extraction-worker/metrics")
+async def extraction_worker_metrics() -> dict:
+    """Return a snapshot of the ExtractionWorker's current state.
+
+    Combines:
+      - per-channel queue depth (``extraction_status="pending"`` count)
+      - rolling claim_rate over 5/15/60min windows
+      - rolling success_rate over the last 5min
+      - circuit breaker state
+      - most recent 10 per-row failures
+
+    Per-process — in multi-replica deploys each worker reports its own
+    slice. Snapshot is best-effort: if the worker singleton is not yet
+    registered (early lifespan), returns a zeroed-out shape instead of
+    erroring.
+    """
+    try:
+        from beever_atlas.services.extraction_worker import get_extraction_worker
+
+        worker = get_extraction_worker()
+        if worker is None:
+            worker_metrics = {
+                "claim_rate_5min": 0.0,
+                "claim_rate_15min": 0.0,
+                "claim_rate_60min": 0.0,
+                "success_rate_5min": 1.0,
+                "breaker_state": "unknown",
+                "recent_failures": [],
+            }
+        else:
+            worker_metrics = worker.metrics_snapshot()
+    except Exception as exc:  # noqa: BLE001 — never crash an observability endpoint
+        logger.warning("extraction-worker metrics: worker snapshot failed: %s", exc)
+        worker_metrics = {
+            "claim_rate_5min": 0.0,
+            "claim_rate_15min": 0.0,
+            "claim_rate_60min": 0.0,
+            "success_rate_5min": 1.0,
+            "breaker_state": "unknown",
+            "recent_failures": [],
+        }
+
+    queue_depth: dict[str, int] = {}
+    try:
+        stores = get_stores()
+        cursor = stores.mongodb._channel_messages.aggregate(  # type: ignore[attr-defined]
+            [
+                {"$match": {"extraction_status": "pending"}},
+                {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+            ]
+        )
+        async for row in cursor:
+            cid = row.get("_id") or ""
+            if cid:
+                queue_depth[str(cid)] = int(row.get("count", 0) or 0)
+    except Exception as exc:  # noqa: BLE001 — never crash the endpoint
+        logger.warning("extraction-worker metrics: queue depth aggregate failed: %s", exc)
+
+    return {
+        "queue_depth_per_channel": queue_depth,
+        **worker_metrics,
+    }
+
+
 __all__ = ["router"]

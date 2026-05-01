@@ -163,6 +163,17 @@ class ExtractionWorker:
         self._settle_seconds = settle_seconds
         self._stale_seconds = stale_seconds
         self._on_extraction_done: list[ExtractionDoneCallback] = []
+        # Rolling-window metrics for the admin observability endpoint
+        # (production-wiring §20). Each entry is a per-tick record:
+        # ``(monotonic_ts, claimed, succeeded, failed)``. Trimmed to the
+        # most recent ~10 minutes worth of ticks (well past the 60-min
+        # window we summarise — a tick is at most every ``_TICK_SECONDS``,
+        # so 10 min ≈ 20 entries).
+        self._tick_records: list[tuple[float, int, int, int]] = []
+        # Most recent failed-row records (capped at 10) for the admin
+        # endpoint's ``recent_failures`` field. Each entry is
+        # ``{message_id, channel_id, error_class, ts}``.
+        self._recent_failures: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Event subscription (used by WikiMaintainer)
@@ -228,6 +239,7 @@ class ExtractionWorker:
         )
         counters = {"claimed": len(claimed), "succeeded": 0, "failed": 0, "channels": 0}
         if not claimed:
+            self._record_tick_metrics(counters)
             return counters
 
         # Group by channel_id — BatchProcessor is per-channel.
@@ -302,7 +314,89 @@ class ExtractionWorker:
             counters["failed"],
             counters["channels"],
         )
+        self._record_tick_metrics(counters)
         return counters
+
+    def _record_tick_metrics(self, counters: dict[str, int]) -> None:
+        """Record one tick result for the rolling-window metrics endpoint.
+
+        Trims out-of-window entries on every record so the in-memory list
+        stays bounded even if no admin call ever drains it. The window
+        upper-bound is the longest reporting window we summarise (60min);
+        anything older is dropped.
+        """
+        now = time.monotonic()
+        self._tick_records.append(
+            (
+                now,
+                counters.get("claimed", 0),
+                counters.get("succeeded", 0),
+                counters.get("failed", 0),
+            )
+        )
+        cutoff = now - 60 * 60  # 60 minutes
+        self._tick_records = [r for r in self._tick_records if r[0] >= cutoff]
+
+    def _record_failure(self, *, message_id: str, channel_id: str, error_class: str) -> None:
+        """Record a per-row failure for the admin endpoint's recent_failures.
+
+        Capped at 10 entries so a flapping channel cannot fill the buffer
+        with thousands of identical failures.
+        """
+        self._recent_failures.append(
+            {
+                "message_id": message_id,
+                "channel_id": channel_id,
+                "error_class": error_class,
+                "ts": int(time.time()),
+            }
+        )
+        if len(self._recent_failures) > 10:
+            self._recent_failures = self._recent_failures[-10:]
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        """Read-only snapshot for the admin observability endpoint.
+
+        Computes:
+          - ``claim_rate_5min`` / ``_15min`` / ``_60min``: rolling claim
+            count divided by window size in seconds
+          - ``success_rate_5min``: succeeded / (succeeded + failed) over
+            the last 5 minutes; 1.0 when there were no rows in the window
+          - ``breaker_state``: passes through the configured breaker's
+            current state for the operator dashboard
+          - ``recent_failures``: most-recent 10 per-row failure records
+        """
+        now = time.monotonic()
+
+        def _within(window_seconds: int) -> list[tuple[float, int, int, int]]:
+            cutoff = now - window_seconds
+            return [r for r in self._tick_records if r[0] >= cutoff]
+
+        def _claim_rate(window_seconds: int) -> float:
+            window_records = _within(window_seconds)
+            claimed = sum(r[1] for r in window_records)
+            return round(claimed / window_seconds, 4) if window_seconds > 0 else 0.0
+
+        last_5min = _within(5 * 60)
+        succeeded_5min = sum(r[2] for r in last_5min)
+        failed_5min = sum(r[3] for r in last_5min)
+        denom = succeeded_5min + failed_5min
+        success_rate = (succeeded_5min / denom) if denom else 1.0
+
+        breaker_state = "unknown"
+        try:
+            breaker_state = self._breaker.state()
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+
+        return {
+            "claim_rate_5min": _claim_rate(5 * 60),
+            "claim_rate_15min": _claim_rate(15 * 60),
+            "claim_rate_60min": _claim_rate(60 * 60),
+            "success_rate_5min": round(success_rate, 4),
+            "breaker_state": breaker_state,
+            "recent_failures": list(self._recent_failures),
+        }
 
     async def sweep_stale(self) -> int:
         """Reset rows stuck in ``"extracting"`` longer than ``stale_seconds``."""
