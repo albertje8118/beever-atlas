@@ -5,11 +5,16 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 
-# VITE_API_URL must be set at build time (Vite bakes env vars into the bundle)
+# Vite inlines env vars at build time, so EVERY ``VITE_*`` we want in the
+# bundle must be threaded through ARG → ENV here AND added to
+# ``docker-compose.yml`` web.build.args. Single source of truth = root
+# ``.env`` for the whole stack; no need for a ``web/.env.local`` file.
 ARG VITE_API_URL=http://localhost:8000
 ENV VITE_API_URL=${VITE_API_URL}
 ARG VITE_BEEVER_API_KEY=
 ENV VITE_BEEVER_API_KEY=${VITE_BEEVER_API_KEY}
+ARG VITE_BEEVER_ADMIN_TOKEN=
+ENV VITE_BEEVER_ADMIN_TOKEN=${VITE_BEEVER_ADMIN_TOKEN}
 
 RUN npm run build
 
