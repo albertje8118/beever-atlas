@@ -155,6 +155,21 @@ async def _run_consolidation(channel_id: str) -> None:
         _consolidation_tasks.pop(channel_id, None)
 
 
+async def consolidate_only(channel_id: str) -> None:
+    """Trigger consolidation for *channel_id* WITHOUT incrementing the sync counter.
+
+    Called by the ExtractionWorker subscriber in server/app.py so that each
+    completed batch fires a consolidation without ticking the AFTER_N_SYNCS
+    counter N times.  The counter is incremented exactly once per logical sync
+    in SyncRunner._run_sync (legacy inline path) and is NOT touched here.
+
+    Policy gate: only spawns for AFTER_EVERY_SYNC and AFTER_N_SYNCS strategies
+    (the same strategies the subscriber already checks before calling us).
+    """
+    logger.info("Orchestrator: consolidate_only (no counter) channel=%s", channel_id)
+    _spawn_consolidation(channel_id)
+
+
 async def trigger_consolidation(channel_id: str) -> None:
     """Manually trigger consolidation regardless of policy. Used by API."""
     logger.info("Orchestrator: manual consolidation triggered channel=%s", channel_id)

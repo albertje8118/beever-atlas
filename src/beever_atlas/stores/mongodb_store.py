@@ -787,6 +787,7 @@ class MongoDBStore:
                 if k in doc
             }
             mutable["updated_at"] = now
+
             # Coerce date-shaped fields back to ``datetime`` so Mongo stores
             # them as BSON dates. ``model_dump(mode="json")`` flattens them
             # to ISO strings, which would break ExtractionWorker's claim

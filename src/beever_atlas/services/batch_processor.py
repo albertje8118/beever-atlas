@@ -215,6 +215,10 @@ class BatchResult:
     total_relationships: int = 0
     batch_breakdowns: list[BatchBreakdown] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
+    # Weaviate UUIDs for every fact persisted across all batches.
+    # Populated on the success path so ExtractionWorker can hand them to
+    # WikiMaintainer without a follow-up Weaviate scan.
+    fact_ids: list[str] = field(default_factory=list)
 
 
 if TYPE_CHECKING:
@@ -385,7 +389,7 @@ class BatchProcessor:
                         current_stage=f"Step 7/7 — Batch {batch_index} complete",
                         batch_result=asdict(breakdown),
                     )
-                    return breakdown, {}, False
+                    return breakdown, {}, False, []
 
                 # Embedding similarity pre-computation is deferred: entity_tags
                 # are not available on raw messages before extraction runs.
@@ -1410,7 +1414,8 @@ class BatchProcessor:
                     batch_facts,
                     batch_entities,
                 )
-                return breakdown, batch_stage_timings, entities_persisted
+                batch_weaviate_ids: list[str] = list(persist_result.get("weaviate_ids") or [])
+                return breakdown, batch_stage_timings, entities_persisted, batch_weaviate_ids
 
         # Launch all batches with bounded concurrency via as_completed.
         # Results stream in completion order; each task returns (batch_idx, payload)
@@ -1451,7 +1456,7 @@ class BatchProcessor:
                 result.errors.append({"batch_num": batch_index, "error": err_text})
                 result.batch_breakdowns.append(failed_breakdown)
             else:
-                breakdown, batch_timings, entities_persisted = raw
+                breakdown, batch_timings, entities_persisted, batch_weaviate_ids = raw
                 result.batch_breakdowns.append(breakdown)
                 if breakdown.error:
                     result.errors.append({"batch_num": batch_index, "error": breakdown.error})
@@ -1459,6 +1464,7 @@ class BatchProcessor:
                     result.total_facts += breakdown.facts_count
                     result.total_entities += breakdown.entities_count
                     result.total_relationships += breakdown.relationships_count
+                    result.fact_ids.extend(batch_weaviate_ids)
                     for stage_key, duration in batch_timings.items():
                         cumulative_timings[stage_key] = (
                             cumulative_timings.get(stage_key, 0.0) + duration

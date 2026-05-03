@@ -190,6 +190,13 @@ async def test_run_sync_marks_completed_with_errors_when_batches_fail(
         raising=False,
     )
 
+    # Force inline extraction path regardless of .env value.
+    monkeypatch.setattr(
+        sync_runner_module,
+        "get_settings",
+        lambda: SimpleNamespace(decouple_extraction=False),
+    )
+
     async def _process_messages(**kwargs) -> BatchResult:
         return BatchResult(
             total_facts=0,
@@ -415,6 +422,13 @@ async def test_run_sync_continues_when_message_store_upsert_fails(
         raising=False,
     )
 
+    # Force inline extraction path regardless of .env value.
+    monkeypatch.setattr(
+        sync_runner_module,
+        "get_settings",
+        lambda: SimpleNamespace(decouple_extraction=False),
+    )
+
     process_called: dict[str, bool] = {"ran": False}
 
     async def _process_messages(**kwargs) -> BatchResult:
@@ -622,6 +636,13 @@ async def test_run_sync_advances_cursor_even_when_batches_fail(
         "beever_atlas.services.sync_runner.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
+    )
+
+    # Force inline extraction path regardless of .env value.
+    monkeypatch.setattr(
+        sync_runner_module,
+        "get_settings",
+        lambda: SimpleNamespace(decouple_extraction=False),
     )
 
     async def _process_messages(**kwargs) -> BatchResult:

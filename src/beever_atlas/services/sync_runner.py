@@ -886,8 +886,14 @@ class SyncRunner:
                 },
             )
 
-            # Trigger consolidation via pipeline orchestrator (policy-aware)
-            if not result.errors:
+            # Trigger consolidation via pipeline orchestrator (policy-aware).
+            # When DECOUPLE_EXTRACTION=true, facts=0 at sync-return time (the
+            # background ExtractionWorker hasn't run yet). Firing consolidation
+            # here would see an empty Weaviate and produce 0 clusters. Instead,
+            # the ExtractionWorker's on_extraction_done subscriber (wired in
+            # server/app.py) fires consolidation after each successful batch so
+            # it sees the real facts.
+            if not result.errors and not decouple_extraction:
                 from beever_atlas.services.pipeline_orchestrator import on_ingestion_complete
 
                 await on_ingestion_complete(channel_id, result.total_facts)

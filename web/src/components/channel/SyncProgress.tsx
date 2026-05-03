@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import type { SyncState } from "@/hooks/useSync";
 import type { BatchResultEntry } from "@/lib/types";
 import { ActivityLog } from "./PipelineActivity";
+import { ExtractionWorkerPanel } from "./ExtractionWorkerPanel";
 
 function BatchResults({ results }: { results: BatchResultEntry[] }) {
   if (results.length === 0) {
@@ -175,6 +176,26 @@ export function SyncProgress({ syncState, isSyncing, channelId }: SyncProgressPr
 
   if (!isFailed && (!isSyncing || syncState.state !== "syncing") && !extractionInProgress) {
     return null;
+  }
+
+  // Decoupled-mode detection: sync returned immediately (zero batch_results /
+  // total_batches) but the background ExtractionWorker has rows to process.
+  // In this path the legacy inline-batch widget has no events to show, so we
+  // replace it entirely with ExtractionWorkerPanel and hide the legacy UI.
+  const hasInlineBatches =
+    (syncState.total_batches ?? 0) > 0 ||
+    (syncState.batch_results?.length ?? 0) > 0;
+  const isDecoupledMode = !isFailed && extractionInProgress && !hasInlineBatches;
+
+  if (isDecoupledMode && channelId && extraction.status) {
+    return (
+      <div className="border-b border-border bg-background px-4 sm:px-6 py-3">
+        <ExtractionWorkerPanel
+          channelId={channelId}
+          extractionStatus={extraction.status}
+        />
+      </div>
+    );
   }
 
   const processed = syncState.processed_messages ?? 0;
