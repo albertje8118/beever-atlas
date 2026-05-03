@@ -7,7 +7,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from apscheduler import AsyncScheduler
-from apscheduler.datastores.mongodb import MongoDBDataStore
+from apscheduler.datastores.memory import MemoryDataStore
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -34,8 +34,23 @@ class SyncScheduler:
     """Manages scheduled sync and consolidation jobs via APScheduler 4.x."""
 
     def __init__(self, mongodb_uri: str) -> None:
+        # ``mongodb_uri`` is preserved on the constructor signature for
+        # backward compat with the lifespan call site, but the apscheduler
+        # data store is now in-memory. Why: the previous MongoDB-backed
+        # store tried to pickle bound-method callables (e.g.
+        # ``self._extraction_tick``) which carry references to live
+        # ``asyncio.Task`` objects — pickle can't serialize those, so EVERY
+        # ``add_schedule`` raised SerializationError, the lifespan caught it
+        # as "non-fatal", and the scheduler silently never registered any
+        # jobs (extraction worker never ticked, decoupled-extraction path
+        # was completely broken on every fresh boot).
+        # MemoryDataStore is the apscheduler default and is appropriate
+        # for OSS solo deploys: schedules are just periodic timers that
+        # re-register on every boot from ``startup()``; no replica
+        # coordination is needed. The actual queue state lives in
+        # ``channel_messages`` (Mongo), not in the scheduler.
         self._mongodb_uri = mongodb_uri
-        self._data_store = MongoDBDataStore(mongodb_uri, database="beever_atlas")
+        self._data_store = MemoryDataStore()
         self._scheduler = AsyncScheduler(data_store=self._data_store)
         self._global_semaphore: asyncio.Semaphore | None = None
         self._started = False
@@ -55,6 +70,18 @@ class SyncScheduler:
         defaults = await stores.mongodb.get_global_defaults()
         self._global_semaphore = asyncio.Semaphore(defaults.max_concurrent_syncs)
 
+        # Newer apscheduler requires the scheduler's async context to be
+        # entered BEFORE ``add_schedule`` is called — otherwise the calls
+        # raise "The scheduler has not been initialized yet". Order is:
+        #   1. enter ``__aenter__()`` so the data store + locks are live
+        #   2. register all schedules (sync, consolidation, extraction
+        #      worker tick/sweep)
+        # Earlier code did this in the opposite order and the entire
+        # scheduler startup silently failed via the non-fatal try/except
+        # in ``server/app.py`` lifespan, leaving the ExtractionWorker
+        # un-ticked and the redesign decoupled-extraction path broken.
+        await self._scheduler.__aenter__()
+
         # Load all channel policies and register jobs
         policies = await stores.mongodb.list_channel_policies()
         for policy in policies:
@@ -70,7 +97,13 @@ class SyncScheduler:
         # subscribe to ``on_extraction_done`` without a constructor weave.
         await self._register_extraction_worker_jobs()
 
-        await self._scheduler.__aenter__()
+        # apscheduler 4 — ``__aenter__`` initialises the data store + locks,
+        # but does NOT start the job-runner loop. Without this call, schedules
+        # are stored but never fire. The previous codebase didn't call it
+        # because the older MongoDBDataStore variant did so internally; the
+        # MemoryDataStore swap exposed the gap.
+        await self._scheduler.start_in_background()
+
         self._started = True
         logger.info(
             "SyncScheduler: started with %d channel policies, max_concurrent_syncs=%d",
@@ -140,7 +173,6 @@ class SyncScheduler:
                 trigger,
                 id=f"sync:{channel_id}",
                 args=[channel_id],
-                max_running_jobs=1,
                 conflict_policy="do_nothing",
             )
             logger.info(
@@ -163,7 +195,6 @@ class SyncScheduler:
                     trigger,
                     id=f"sync:{channel_id}",
                     args=[channel_id],
-                    max_running_jobs=1,
                     conflict_policy="do_nothing",
                 )
                 logger.info(
@@ -199,7 +230,6 @@ class SyncScheduler:
                     trigger,
                     id=f"consolidate:{channel_id}",
                     args=[channel_id],
-                    max_running_jobs=1,
                     conflict_policy="do_nothing",
                 )
                 logger.info(
@@ -247,7 +277,6 @@ class SyncScheduler:
             self._extraction_tick,
             IntervalTrigger(seconds=_TICK_SECONDS),
             id="extraction:tick",
-            max_running_jobs=1,
             conflict_policy="do_nothing",
         )
         # Sweep interval is derived from the stale window so they stay
@@ -258,7 +287,6 @@ class SyncScheduler:
             self._extraction_sweep,
             IntervalTrigger(seconds=sweep_interval),
             id="extraction:sweep",
-            max_running_jobs=1,
             conflict_policy="do_nothing",
         )
         logger.info(

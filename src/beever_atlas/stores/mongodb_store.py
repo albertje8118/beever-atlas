@@ -786,18 +786,31 @@ class MongoDBStore:
                 )
                 if k in doc
             }
-            mutable["updated_at"] = now.isoformat()
-            # Immutable-on-existing-row fields ($setOnInsert) — extraction state
-            # is owned by the worker, not the sync runner.
+            mutable["updated_at"] = now
+            # Coerce date-shaped fields back to ``datetime`` so Mongo stores
+            # them as BSON dates. ``model_dump(mode="json")`` flattens them
+            # to ISO strings, which would break ExtractionWorker's claim
+            # filter — the filter compares ``next_attempt_at <= now`` and
+            # ``created_at < now - settle`` using ``datetime`` values; a
+            # string-vs-date $lte comparison in Mongo silently returns false
+            # and rows would sit in ``pending`` forever (no claims, no
+            # extraction, no wiki).
+            def _to_dt(v: Any) -> datetime:
+                if isinstance(v, datetime):
+                    return v
+                if isinstance(v, str):
+                    return datetime.fromisoformat(v.replace("Z", "+00:00"))
+                return now
+
             on_insert = {
                 "source_id": doc["source_id"],
                 "channel_id": doc["channel_id"],
                 "message_id": doc["message_id"],
                 "extraction_status": doc.get("extraction_status", "pending"),
                 "attempt_count": doc.get("attempt_count", 0),
-                "next_attempt_at": doc.get("next_attempt_at", now.isoformat()),
+                "next_attempt_at": _to_dt(doc.get("next_attempt_at", now)),
                 "last_error": doc.get("last_error"),
-                "created_at": doc.get("created_at", now.isoformat()),
+                "created_at": _to_dt(doc.get("created_at", now)),
             }
             ops.append(
                 UpdateOne(

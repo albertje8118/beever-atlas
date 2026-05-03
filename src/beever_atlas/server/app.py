@@ -168,7 +168,14 @@ async def lifespan(app: FastAPI):
         await scheduler.startup()
         init_scheduler(scheduler)
     except Exception as exc:
-        logging.getLogger(__name__).warning("SyncScheduler startup failed (non-fatal): %s", exc)
+        import traceback as _tb
+
+        logging.getLogger(__name__).warning(
+            "SyncScheduler startup failed (non-fatal): %s: %s\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(),
+        )
 
     # Wire the WikiMaintainer singleton + subscribe it to ExtractionWorker
     # events. Must happen AFTER ``scheduler.startup()`` because the
