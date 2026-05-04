@@ -841,7 +841,6 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
   const {
     data: page,
     isLoading: isPageLoading,
-    isRevalidating,
   } = useWikiPage(
     wantsPageFetch ? channelId : undefined,
     wantsPageFetch ? selection.pageId : undefined,
@@ -923,15 +922,14 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
           </div>
         </div>
 
-        {/* Full page render — fades during revalidation so the user
-            isn't startled by content disappearing on a poll. */}
+        {/* Full page render. Previously wrapped in
+            ``transition-opacity ${isRevalidating ? "opacity-60" : "opacity-100"}``
+            but ``isRevalidating`` flips on every poll regardless of
+            whether content changed, so the wrapper produced a periodic
+            flash. The ``last_updated`` guard in ``useWikiPage`` already
+            prevents content tearing — render directly. */}
         {wantsPageFetch && (
-          <div
-            className={`transition-opacity duration-150 ${
-              isRevalidating ? "opacity-60" : "opacity-100"
-            }`}
-            data-testid="wiki-graph-panel-content"
-          >
+          <div data-testid="wiki-graph-panel-content">
             {isPageLoading && (
               <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
                 <Loader2 size={14} className="animate-spin" />

@@ -504,7 +504,7 @@ export function WikiTab() {
 
   // Only fetch non-overview pages lazily (when not viewing a version)
   const lazyPageId = viewingVersionNumber === null && activePageId !== "overview" ? activePageId : undefined;
-  const { data: pageData, isLoading: isPageLoading, isRevalidating: isPageRevalidating } = useWikiPage(channelId, lazyPageId, targetLang);
+  const { data: pageData, isLoading: isPageLoading } = useWikiPage(channelId, lazyPageId, targetLang);
 
   const {
     mutate: triggerRefresh,
@@ -805,16 +805,14 @@ export function WikiTab() {
       </div>
     );
   } else {
-    // Wrap in a div that fades slightly during background revalidation so the
-    // user perceives a smooth update rather than a hard flash when the poll
-    // returns a changed version.
-    pageContent = (
-      <div
-        className={`transition-opacity duration-150 ${isPageRevalidating ? "opacity-60" : "opacity-100"}`}
-      >
-        {renderPage(activePage, topicPages, handleNavigate, displayedLang)}
-      </div>
-    );
+    // The opacity-fade-during-revalidation pattern was the actual cause
+    // of the long-running "wiki page flashes every few minutes" bug.
+    // ``isPageRevalidating`` flips true on EVERY poll cycle (independent
+    // of whether content actually changed), so the wrapper produced a
+    // 100→60→100 flash even when the lastKeyRef guard correctly skipped
+    // the data swap. The guard already prevents content tearing, so the
+    // wrapper is pure noise. Render the page directly.
+    pageContent = renderPage(activePage, topicPages, handleNavigate, displayedLang);
   }
 
   return (
