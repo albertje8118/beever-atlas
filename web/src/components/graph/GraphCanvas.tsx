@@ -1,47 +1,88 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import type { GraphEntity, GraphRelationship } from "@/hooks/useGraph";
 import { getTypeColors } from "./GraphFilters";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 interface GraphCanvasProps {
   entities: GraphEntity[];
   relationships: GraphRelationship[];
   visibleTypes: string[];
+  /** When true, orphan (unconnected) nodes are injected into the canvas */
+  showOrphans: boolean;
   onSelectEntity: (id: string | null) => void;
   selectedEntityId: string | null;
+  /** Callback so parent can read the current orphan count for the pill */
+  onOrphanCount: (count: number) => void;
 }
 
 /** Cache of node positions keyed by entity ID for deterministic layout */
 const positionCache = new Map<string, { x: number; y: number }>();
 
+/**
+ * Build the cytoscape ElementDefinition for a single entity.
+ * Obsidian-style: small fixed dot (12 px) with label BELOW.
+ * Hub nodes get slightly larger dots (up to 20 px) and bolder labels.
+ */
+function buildNode(
+  e: GraphEntity,
+  connectionCount: Map<string, number>,
+  filteredIds: Set<string>,
+): ElementDefinition {
+  const colors = getTypeColors(e.type);
+  const conns = connectionCount.get(e.id) ?? 0;
+  // Dot size: 12 px base, +1 px per connection, max 22 px — keeps nodes small
+  const dotSize = Math.min(22, 12 + conns);
+  const cached = positionCache.get(e.id);
+  const visualDesc = (e.properties as Record<string, unknown>)?.visual_description as string | undefined;
+  const isPending = e.status === "pending";
+  // Label font: 9 px base for orphans, slightly larger for hubs
+  const fontSize = conns === 0 ? 9 : Math.min(12, 9 + Math.floor(conns / 2));
+  return {
+    data: {
+      id: e.id,
+      label: e.name,
+      type: e.type,
+      bgColor: colors.node,
+      borderColor: colors.nodeBorder,
+      dotSize,
+      fontSize,
+      hasMedia: !!visualDesc,
+      visualDesc: visualDesc || "",
+      pending: isPending,
+      isOrphan: !filteredIds.has(e.id) || conns === 0,
+    },
+    ...(cached ? { position: cached } : {}),
+  };
+}
+
 export function GraphCanvas({
   entities,
   relationships,
   visibleTypes,
+  showOrphans,
   onSelectEntity,
   selectedEntityId,
+  onOrphanCount,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
 
-  // Names of entities filtered out because they have no edges in the
-  // visible graph. Surfaced as a small "N unconnected" pill in the
-  // corner so the operator can hover to see the list. Hiding them
-  // from the canvas removes the "horizontal noise line" the user
-  // reported — Cytoscape's cose was placing 0-degree nodes in a row
-  // along the top because they had no spring forces to position them.
-  const [orphanNames, setOrphanNames] = useState<string[]>([]);
+  // Stable ref to the orphan entities list so the showOrphans effect can
+  // inject/remove without re-mounting cytoscape.
+  const orphanEntitiesRef = useRef<GraphEntity[]>([]);
 
-  // Keep a stable ref to the latest onSelectEntity to avoid stale closures
-  // in cytoscape event handlers (the main useEffect doesn't include
-  // onSelectEntity in its deps to avoid destroying cytoscape on every render).
   const onSelectRef = useRef(onSelectEntity);
   useLayoutEffect(() => {
     onSelectRef.current = onSelectEntity;
   });
 
-  // Build elements whenever data changes
+  const onOrphanCountRef = useRef(onOrphanCount);
+  useLayoutEffect(() => {
+    onOrphanCountRef.current = onOrphanCount;
+  });
+
+  // Main build effect — fires when data or type filter changes.
+  // Never adds orphan nodes here; the showOrphans effect handles that.
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -52,7 +93,7 @@ export function GraphCanvas({
 
     const filteredIds = new Set(filtered.map((e) => e.id));
 
-    // Count connections per node for size scaling
+    // Count connections per visible node
     const connectionCount = new Map<string, number>();
     relationships.forEach((r) => {
       if (filteredIds.has(r.source_id) && filteredIds.has(r.target_id)) {
@@ -61,56 +102,25 @@ export function GraphCanvas({
       }
     });
 
-    // Split into connected vs isolated. Cytoscape's cose places
-    // 0-degree nodes wherever it has free space (typically the canvas
-    // edge), which produced the "horizontal noise line" the user
-    // reported. Hide isolated nodes from the visible graph and surface
-    // their count as a small overlay pill so the information isn't
-    // lost.
-    //
-    // Degenerate fallback: if EVERY entity is unconnected (e.g. fresh
-    // channel where relationships haven't been built yet), filtering
-    // them all out leaves a blank canvas — strictly worse than the
-    // noise-line. In that case, render all entities and skip the
-    // orphan pill.
+    // Connected vs isolated split
     const connectedFiltered = filtered.filter(
       (e) => (connectionCount.get(e.id) ?? 0) > 0,
     );
-    const isolatedNames = filtered
-      .filter((e) => (connectionCount.get(e.id) ?? 0) === 0)
-      .map((e) => e.name);
+    const isolatedEntities = filtered.filter(
+      (e) => (connectionCount.get(e.id) ?? 0) === 0,
+    );
+    // Degenerate: if nothing is connected, render everything
     const renderableEntities =
       connectedFiltered.length > 0 ? connectedFiltered : filtered;
-    // Only surface the pill when there's a meaningful core to anchor
-    // on — otherwise the operator sees the whole graph anyway.
-    setOrphanNames(connectedFiltered.length > 0 ? isolatedNames : []);
+    const orphans = connectedFiltered.length > 0 ? isolatedEntities : [];
+    orphanEntitiesRef.current = orphans;
+    onOrphanCountRef.current(orphans.length);
 
-    // Check if we have cached positions for these nodes
     const hasCachedPositions = renderableEntities.some((e) => positionCache.has(e.id));
 
-    const nodes: ElementDefinition[] = renderableEntities.map((e) => {
-      const colors = getTypeColors(e.type);
-      const conns = connectionCount.get(e.id) ?? 0;
-      const size = Math.min(116, 58 + conns * 9);
-      const cached = positionCache.get(e.id);
-      const visualDesc = (e.properties as Record<string, unknown>)?.visual_description as string | undefined;
-      const isPending = e.status === "pending";
-      return {
-        data: {
-          id: e.id,
-          label: e.name,
-          type: e.type,
-          bgColor: colors.node,
-          borderColor: colors.nodeBorder,
-          nodeSize: size,
-          fontSize: Math.max(10, Math.min(14, 10 + conns)),
-          hasMedia: !!visualDesc,
-          visualDesc: visualDesc || "",
-          pending: isPending,
-        },
-        ...(cached ? { position: cached } : {}),
-      };
-    });
+    const nodes: ElementDefinition[] = renderableEntities.map((e) =>
+      buildNode(e, connectionCount, filteredIds),
+    );
 
     const edges: ElementDefinition[] = relationships
       .filter((r) => filteredIds.has(r.source_id) && filteredIds.has(r.target_id))
@@ -123,11 +133,11 @@ export function GraphCanvas({
         },
       }));
 
-    // Detect dark mode for edge label theming
     const isDark = document.documentElement.classList.contains("dark");
-    const edgeLabelColor = isDark ? "#cbd5e1" : "#475569";
+    const labelColor = isDark ? "#e2e8f0" : "#1e293b";
+    const edgeLabelColor = isDark ? "#94a3b8" : "#64748b";
     const edgeLabelBg = isDark ? "#1e293b" : "#f8fafc";
-    const edgeLineColor = isDark ? "#475569" : "#cbd5e1";
+    const edgeLineColor = isDark ? "#334155" : "#cbd5e1";
     const edgeHoverColor = isDark ? "#94a3b8" : "#64748b";
     const edgeHoverLabelColor = isDark ? "#e2e8f0" : "#334155";
     const edgeHighlightColor = isDark ? "#38bdf8" : "#0B4F6C";
@@ -135,37 +145,52 @@ export function GraphCanvas({
     if (cyRef.current) {
       cyRef.current.destroy();
     }
+
     const cy = cytoscape({
       container: containerRef.current,
       elements: [...nodes, ...edges],
       style: [
+        // ─── Node: Obsidian small-dot style ───────────────────────────
+        // Label is BELOW the node (text-valign: bottom, text-margin-y pushes
+        // it further down). No text inside the disk. Dot is small + crisp.
         {
           selector: "node",
           style: {
             "background-color": "data(bgColor)",
             "border-color": "data(borderColor)",
-            "border-width": 2,
+            "border-width": 1.5,
+            // Label sits below the node, not inside
             label: "data(label)",
-            color: "#ffffff",
+            color: labelColor,
             "font-size": "data(fontSize)",
-            "font-weight": 600,
-            "text-valign": "center",
+            "font-weight": 500,
+            "text-valign": "bottom",
             "text-halign": "center",
+            // Push the label 6 px below the dot's edge so it reads as separate
+            "text-margin-y": 6,
             "text-wrap": "wrap",
-            "text-max-width": "110px",
-            width: "data(nodeSize)",
-            height: "data(nodeSize)",
-            "text-outline-color": "data(bgColor)",
-            "text-outline-width": 2,
+            // Allow 2 lines for long snake_case names
+            "text-max-width": "90px",
+            // No outline — label is outside the colored disk so no clash
+            "text-outline-width": 0,
+            width: "data(dotSize)",
+            height: "data(dotSize)",
             opacity: 1,
-            "transition-property": "border-width, border-color, width, height, opacity",
+            "transition-property": "border-width, border-color, width, height, opacity, background-color",
             "transition-duration": "0.2s",
           } as unknown as cytoscape.Css.Node,
+        },
+        // Orphan nodes (injected when showOrphans=true) appear slightly dimmer
+        {
+          selector: "node[?isOrphan]",
+          style: {
+            opacity: 0.65,
+          },
         },
         {
           selector: "node.selected-highlight",
           style: {
-            "border-width": 4,
+            "border-width": 3,
             "border-color": "#ffffff",
             "overlay-color": "#0B4F6C",
             "overlay-opacity": 0.15,
@@ -174,7 +199,7 @@ export function GraphCanvas({
         {
           selector: "node.hover",
           style: {
-            "border-width": 3,
+            "border-width": 2.5,
             "border-color": "#ffffff",
             "overlay-color": "#0B4F6C",
             "overlay-opacity": 0.1,
@@ -184,48 +209,47 @@ export function GraphCanvas({
           selector: "node[?hasMedia]",
           style: {
             "border-style": "double" as const,
-            "border-width": 4,
+            "border-width": 3,
           },
         },
         {
           selector: "node[?pending]",
           style: {
             "border-style": "dashed" as const,
-            opacity: 0.5,
+            opacity: 0.45,
           },
         },
         {
           selector: "node.dimmed",
-          style: { opacity: 0.35 },
+          style: { opacity: 0.2 },
         },
         {
-          // One-hop-out neighborhood — amber rim. Matches the
-          // ``WikiGraph`` highlight pattern for visual consistency.
           selector: "node.neighbor",
           style: {
-            "border-width": 3,
+            "border-width": 2.5,
             "border-color": "#facc15",
           },
         },
+        // ─── Edge styles ──────────────────────────────────────────────
         {
           selector: "edge",
           style: {
-            width: 1.5,
+            width: 1,
             "line-color": edgeLineColor,
             "target-arrow-color": edgeLineColor,
             "target-arrow-shape": "triangle",
-            "arrow-scale": 0.7,
+            "arrow-scale": 0.6,
             "curve-style": "bezier",
             label: "data(label)",
-            "font-size": "8px",
+            "font-size": "7px",
             color: edgeLabelColor,
             "text-rotation": "autorotate",
-            "text-margin-y": -6,
+            "text-margin-y": -5,
             "text-background-color": edgeLabelBg,
-            "text-background-opacity": 0.9,
+            "text-background-opacity": 0.85,
             "text-background-padding": "2px",
             "line-style": "solid",
-            opacity: 0.65,
+            opacity: 0.55,
             "transition-property": "width, line-color, opacity",
             "transition-duration": "0.2s",
           } as unknown as cytoscape.Css.Edge,
@@ -233,77 +257,71 @@ export function GraphCanvas({
         {
           selector: "edge.hover",
           style: {
-            width: 2.5,
+            width: 2,
             "line-color": edgeHoverColor,
             "target-arrow-color": edgeHoverColor,
-            "font-size": "9px",
+            "font-size": "8px",
             color: edgeHoverLabelColor,
+            opacity: 1,
           },
         },
         {
           selector: "edge.dimmed",
-          style: { opacity: 0.2 },
+          style: { opacity: 0.12 },
         },
         {
           selector: "edge.highlighted",
           style: {
-            width: 2.5,
+            width: 2,
             "line-color": edgeHighlightColor,
             "target-arrow-color": edgeHighlightColor,
-            "font-size": "9px",
+            "font-size": "8px",
             color: edgeHighlightColor,
             opacity: 1,
           },
         },
       ],
       layout: hasCachedPositions
-        ? { name: "preset", fit: true, padding: 40 }
+        ? { name: "preset", fit: true, padding: 60 }
         : {
-            // Obsidian-style force-directed feel:
-            //   • Higher nodeRepulsion (~5x) pushes clusters apart so
-            //     dense clumps don't crush together.
-            //   • Lower gravity lets isolated nodes drift to the
-            //     periphery instead of collapsing toward center.
-            //   • ``animate: 'end'`` gives a 600ms settle-into-place
-            //     reveal on first load (the eye tracks the motion and
-            //     understands the structure better than a hard pop).
-            // Tuned values that were known-good before the over-tune
-            // attempt: 200k repulsion + 0.05 gravity pushed nodes so
-            // far that cose's ``fit:true`` zoomed out past minZoom 0.3
-            // → nodes rendered as invisible pixels. Back to the values
-            // that match the original "image 1" working state, with
-            // the orphan-filter doing the de-clutter work instead.
+            // cose with safe spread values. nodeRepulsion 80k–100k is the
+            // confirmed safe range. 200k caused blank canvas (cose fit zoomed
+            // past minZoom). idealEdgeLength 220 gives Obsidian-style generous
+            // spacing between connected clusters. gravity 0.15 keeps graph
+            // from collapsing without drifting off-canvas.
             name: "cose",
             animate: "end",
-            animationDuration: 600,
+            animationDuration: 700,
             animationEasing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction,
             randomize: false,
+            // nodeDimensionsIncludeLabels=true is critical for Obsidian style:
+            // labels are BELOW nodes so they need layout clearance to avoid
+            // overlapping adjacent labels.
             nodeDimensionsIncludeLabels: true,
-            nodeRepulsion: () => 80000,
-            idealEdgeLength: () => 180,
-            edgeElasticity: () => 50,
+            nodeRepulsion: () => 100000,
+            idealEdgeLength: () => 220,
+            edgeElasticity: () => 45,
             gravity: 0.15,
-            padding: 80,
+            padding: 100,
             fit: true,
           } as cytoscape.LayoutOptions,
-      minZoom: 0.3,
+      minZoom: 0.2,
       maxZoom: 3,
       wheelSensitivity: 0.3,
     });
 
-    // Save positions after layout for deterministic re-renders
+    // Save positions after layout
     if (!hasCachedPositions) {
-      cy.nodes().forEach((node) => {
-        const pos = node.position();
-        positionCache.set(node.id(), { x: pos.x, y: pos.y });
+      cy.one("layoutstop", () => {
+        cy.nodes().forEach((node) => {
+          const pos = node.position();
+          positionCache.set(node.id(), { x: pos.x, y: pos.y });
+        });
       });
     }
 
-    // Elements start visible (opacity set in styles above).
-
-    // --- Physics: spring pull on connected nodes when dragging + momentum ---
+    // ─── Physics: spring drag + momentum ─────────────────────────────
     let dragTarget: cytoscape.NodeSingular | null = null;
-    // Track velocity per neighbor for momentum after release
     const velocities = new Map<string, { vx: number; vy: number }>();
     let momentumFrame: number | null = null;
 
@@ -328,11 +346,7 @@ export function GraphCanvas({
         const force = Math.min(0.02, 80 / (dist * dist));
         const moveX = dx * force;
         const moveY = dy * force;
-        neighbor.position({
-          x: nPos.x + moveX,
-          y: nPos.y + moveY,
-        });
-        // Accumulate velocity for momentum
+        neighbor.position({ x: nPos.x + moveX, y: nPos.y + moveY });
         const prev = velocities.get(neighbor.id()) || { vx: 0, vy: 0 };
         velocities.set(neighbor.id(), {
           vx: prev.vx * 0.5 + moveX * 8,
@@ -343,11 +357,8 @@ export function GraphCanvas({
 
     cy.on("free", "node", () => {
       dragTarget = null;
-
-      // Apply momentum: neighbors drift with decaying velocity
       const friction = 0.88;
       const minSpeed = 0.3;
-
       const step = () => {
         let anyMoving = false;
         velocities.forEach((vel, nodeId) => {
@@ -364,24 +375,18 @@ export function GraphCanvas({
           momentumFrame = requestAnimationFrame(step);
         } else {
           momentumFrame = null;
-          // Save final positions after momentum settles
           cy.nodes().forEach((n) => {
-            const p = n.position();
-            positionCache.set(n.id(), { x: p.x, y: p.y });
+            positionCache.set(n.id(), { ...n.position() });
           });
         }
       };
       momentumFrame = requestAnimationFrame(step);
-
-      // Also save dragged node position immediately
       cy.nodes().forEach((n) => {
-        const p = n.position();
-        positionCache.set(n.id(), { x: p.x, y: p.y });
+        positionCache.set(n.id(), { ...n.position() });
       });
     });
 
-    // --- Interactions ---
-    // Tooltip element
+    // ─── Interactions ─────────────────────────────────────────────────
     let tooltip: HTMLDivElement | null = null;
 
     cy.on("mouseover", "node", (evt) => {
@@ -389,30 +394,27 @@ export function GraphCanvas({
       const node = evt.target;
       const type = node.data("type") as string;
       const label = node.data("label") as string;
-      // Obsidian-style float: gentle 12% grow on hover. Animates the
-      // pixel width/height (NOT just the class) so the size change is
-      // smooth rather than stepped. Stops any in-flight animation
-      // first so rapid mouseover→out→over toggles don't fight.
-      const baseSize = node.data("nodeSize") as number;
+      // Hover float: grow dot by ~30% (small dot so 30% is still subtle)
+      const baseSize = node.data("dotSize") as number;
       node.stop(true, false).animate(
-        { style: { width: baseSize * 1.12, height: baseSize * 1.12 } },
-        { duration: 180, easing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction },
+        { style: { width: baseSize * 1.3, height: baseSize * 1.3 } },
+        { duration: 150, easing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction },
       );
 
-      // Create tooltip
       if (!tooltip) {
         tooltip = document.createElement("div");
         tooltip.style.cssText =
-          "position:absolute;pointer-events:none;z-index:50;padding:4px 8px;" +
+          "position:absolute;pointer-events:none;z-index:50;padding:5px 10px;" +
           "border-radius:6px;font-size:11px;white-space:nowrap;" +
-          "background:rgba(15,23,42,0.9);color:#f1f5f9;box-shadow:0 2px 8px rgba(0,0,0,0.15);";
+          "background:rgba(15,23,42,0.92);color:#f1f5f9;box-shadow:0 2px 12px rgba(0,0,0,0.25);" +
+          "border:1px solid rgba(255,255,255,0.08);backdrop-filter:blur(4px);";
         containerRef.current?.appendChild(tooltip);
       }
       const visualDesc = node.data("visualDesc") as string | undefined;
       if (visualDesc) {
-        tooltip.textContent = `${label} · ${type}\n${visualDesc.slice(0, 100)}`;
+        tooltip.textContent = `${label} · ${type}\n${visualDesc.slice(0, 120)}`;
         tooltip.style.whiteSpace = "pre-wrap";
-        tooltip.style.maxWidth = "300px";
+        tooltip.style.maxWidth = "280px";
       } else {
         tooltip.textContent = `${label} · ${type}`;
         tooltip.style.whiteSpace = "nowrap";
@@ -424,29 +426,22 @@ export function GraphCanvas({
     cy.on("mousemove", "node", (evt) => {
       if (tooltip && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        tooltip.style.left = `${evt.originalEvent.clientX - rect.left + 12}px`;
-        tooltip.style.top = `${evt.originalEvent.clientY - rect.top - 28}px`;
+        tooltip.style.left = `${evt.originalEvent.clientX - rect.left + 14}px`;
+        tooltip.style.top = `${evt.originalEvent.clientY - rect.top - 32}px`;
       }
     });
 
     cy.on("mouseout", "node", (evt) => {
       const node = evt.target;
       node.removeClass("hover");
-      const baseSize = node.data("nodeSize") as number;
+      const baseSize = node.data("dotSize") as number;
       node.stop(true, false).animate(
         { style: { width: baseSize, height: baseSize } },
-        { duration: 150, easing: "ease-in-cubic" as cytoscape.Css.TransitionTimingFunction },
+        { duration: 130, easing: "ease-in-cubic" as cytoscape.Css.TransitionTimingFunction },
       );
-      if (tooltip) {
-        tooltip.style.display = "none";
-      }
+      if (tooltip) tooltip.style.display = "none";
     });
 
-    // Click: select + highlight neighborhood. Three-class pattern
-    // ported from WikiGraph for visual consistency:
-    //   • everything dims
-    //   • clicked node + its closed-neighborhood un-dim
-    //   • neighborhood nodes get the amber-rim ``neighbor`` class
     cy.on("tap", "node", (evt) => {
       const node = evt.target;
       const neighborhood = node.closedNeighborhood();
@@ -465,11 +460,10 @@ export function GraphCanvas({
       }
     });
 
-    // Double-click: smooth zoom to neighborhood
     cy.on("dbltap", "node", (evt) => {
       const neighborhood = evt.target.closedNeighborhood();
       cy.animate({
-        fit: { eles: neighborhood, padding: 60 },
+        fit: { eles: neighborhood, padding: 80 },
         duration: 500,
         easing: "ease-in-out-cubic" as cytoscape.Css.TransitionTimingFunction,
       });
@@ -485,6 +479,60 @@ export function GraphCanvas({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entities, relationships, visibleTypes]);
+
+  // ─── Show / hide orphan nodes without remounting cytoscape ──────────
+  // When showOrphans flips true we cy.add() the orphan nodes with preset
+  // positions placed in a sparse column to the right of the main graph.
+  // When it flips false we remove them by class "orphan-node".
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    if (!showOrphans) {
+      // Remove any previously injected orphan nodes
+      cy.remove("node.orphan-node");
+      return;
+    }
+
+    const orphans = orphanEntitiesRef.current;
+    if (orphans.length === 0) return;
+
+    // Find the bounding box of existing nodes to place orphans to the right
+    const bbox = cy.nodes().boundingBox({});
+    const startX = (bbox.x2 ?? 400) + 160;
+    const startY = bbox.y1 ?? 0;
+    const stepY = 80;
+
+    // Build visible connection count context (orphans have 0 connections by definition)
+    const emptyCount = new Map<string, number>();
+    const emptyIds = new Set<string>();
+
+    const newElements: ElementDefinition[] = orphans.map((e, i) => {
+      const node = buildNode(e, emptyCount, emptyIds);
+      const cachedPos = positionCache.get(e.id);
+      return {
+        ...node,
+        position: cachedPos ?? { x: startX, y: startY + i * stepY },
+        classes: "orphan-node",
+      };
+    });
+
+    cy.add(newElements);
+
+    // Save positions for these new nodes
+    orphans.forEach((e, i) => {
+      if (!positionCache.has(e.id)) {
+        positionCache.set(e.id, { x: startX, y: startY + i * stepY });
+      }
+    });
+
+    // Animate in: start transparent, fade to 0.65
+    cy.nodes(".orphan-node").style("opacity", 0);
+    cy.nodes(".orphan-node").animate(
+      { style: { opacity: 0.65 } },
+      { duration: 300, easing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction },
+    );
+  }, [showOrphans]);
 
   // Highlight selected node externally
   useEffect(() => {
@@ -506,7 +554,7 @@ export function GraphCanvas({
     return (
       <div className="flex-1 flex items-center justify-center bg-muted/5">
         <div className="text-center space-y-2">
-          <div className="text-4xl opacity-20">🕸️</div>
+          <div className="text-4xl opacity-20">&#x1f578;&#xfe0f;</div>
           <p className="text-sm text-muted-foreground">
             No entities to display. Run a sync to populate the graph.
           </p>
@@ -515,42 +563,10 @@ export function GraphCanvas({
     );
   }
 
-  // Cytoscape mounts to ``containerRef`` directly. The previous
-  // attempt wrapped it in a ``relative`` parent + an ``absolute
-  // inset-0`` child for the pill overlay, but that fragile layout
-  // chain broke cytoscape's size detection on some viewports and
-  // produced a blank canvas. The pill now hangs off the same flex
-  // item via a sibling ``absolute`` overlay positioned within the
-  // FullscreenWrapper's ``relative`` outer.
   return (
-    <>
-      <div
-        ref={containerRef}
-        className="flex-1 min-h-0 bg-muted/5 overflow-hidden"
-      />
-      {orphanNames.length > 0 && (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                className="absolute top-3 left-3 z-10 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/80 px-2.5 py-1 text-[11px] font-medium text-muted-foreground backdrop-blur-sm hover:bg-card hover:text-foreground transition-colors"
-                aria-label={`${orphanNames.length} unconnected entities hidden — hover to view`}
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />
-                {orphanNames.length} unconnected
-              </button>
-            }
-          />
-          <TooltipContent side="bottom" className="text-xs max-w-xs">
-            <div className="font-medium mb-1">Hidden — no edges in graph</div>
-            <div className="text-muted-foreground/90 leading-relaxed">
-              {orphanNames.slice(0, 12).join(", ")}
-              {orphanNames.length > 12 && ` … +${orphanNames.length - 12} more`}
-            </div>
-          </TooltipContent>
-        </Tooltip>
-      )}
-    </>
+    <div
+      ref={containerRef}
+      className="flex-1 min-h-0 bg-muted/5 overflow-hidden"
+    />
   );
 }
