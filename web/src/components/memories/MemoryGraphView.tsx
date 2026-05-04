@@ -111,7 +111,7 @@ export function MemoryGraphView({ channelId }: Props) {
           wrapper takes care of the fullscreen overlay; cytoscape's
           ResizeObserver in GraphCanvas handles the layout reflow. */}
       <FullscreenWrapper label="Enlarge graph" className="flex-1 min-h-0">
-        <div className="flex h-full w-full min-h-0 overflow-hidden">
+        <div className="relative flex h-full w-full min-h-0 overflow-hidden">
           <GraphCanvas
             entities={entities}
             relationships={relationships}

@@ -267,20 +267,22 @@ export function GraphCanvas({
             //   • ``animate: 'end'`` gives a 600ms settle-into-place
             //     reveal on first load (the eye tracks the motion and
             //     understands the structure better than a hard pop).
-            // Tightened second-pass tuning after orphan nodes were
-            // filtered out. With only the connected core in play, much
-            // higher nodeRepulsion + lower gravity gives the open
-            // Obsidian-like radial drift.
+            // Tuned values that were known-good before the over-tune
+            // attempt: 200k repulsion + 0.05 gravity pushed nodes so
+            // far that cose's ``fit:true`` zoomed out past minZoom 0.3
+            // → nodes rendered as invisible pixels. Back to the values
+            // that match the original "image 1" working state, with
+            // the orphan-filter doing the de-clutter work instead.
             name: "cose",
             animate: "end",
-            animationDuration: 700,
+            animationDuration: 600,
             animationEasing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction,
-            randomize: true,
+            randomize: false,
             nodeDimensionsIncludeLabels: true,
-            nodeRepulsion: () => 200000,
-            idealEdgeLength: () => 220,
-            edgeElasticity: () => 40,
-            gravity: 0.05,
+            nodeRepulsion: () => 80000,
+            idealEdgeLength: () => 180,
+            edgeElasticity: () => 50,
+            gravity: 0.15,
             padding: 80,
             fit: true,
           } as cytoscape.LayoutOptions,
@@ -513,9 +515,19 @@ export function GraphCanvas({
     );
   }
 
+  // Cytoscape mounts to ``containerRef`` directly. The previous
+  // attempt wrapped it in a ``relative`` parent + an ``absolute
+  // inset-0`` child for the pill overlay, but that fragile layout
+  // chain broke cytoscape's size detection on some viewports and
+  // produced a blank canvas. The pill now hangs off the same flex
+  // item via a sibling ``absolute`` overlay positioned within the
+  // FullscreenWrapper's ``relative`` outer.
   return (
-    <div className="relative flex-1 min-h-0 bg-muted/5 overflow-hidden">
-      <div ref={containerRef} className="absolute inset-0" />
+    <>
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 bg-muted/5 overflow-hidden"
+      />
       {orphanNames.length > 0 && (
         <Tooltip>
           <TooltipTrigger
@@ -539,6 +551,6 @@ export function GraphCanvas({
           </TooltipContent>
         </Tooltip>
       )}
-    </div>
+    </>
   );
 }
