@@ -85,7 +85,7 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
           <button
             onClick={onClick}
             aria-label={fullTitle}
-            className={`group/row flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+            className={`group/row relative flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
               isActive
                 ? "bg-primary/10 text-primary border-l-2 border-primary font-medium"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -100,19 +100,22 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
               /* Section number leads for topics — eye scans by number
                  first. Tooltip carries the full title for ambiguous
                  truncations. */
-              <span className="text-[11px] text-muted-foreground/80 font-mono font-semibold shrink-0 min-w-[2rem] tabular-nums">
+              <span className="text-[11px] text-muted-foreground/80 font-mono font-semibold shrink-0 tabular-nums">
                 {displaySectionNumber(node.section_number)}
               </span>
             )}
             <span className="truncate flex-1">{shownTitle}</span>
-            {/* Memory count — hidden by default, revealed on row hover.
-                The bare number wasn't self-explanatory and competed
-                with the section number for the operator's eye; on
-                hover we surface the full "N memories" so the unit
-                disambiguates itself. Tooltip carries it too for
-                pointer-less navigation. */}
+            {/* Memory count — hidden by default (display:none, no
+                layout slot reserved), revealed on row hover. Using
+                ``hidden`` instead of ``opacity-0`` is critical: the
+                opacity approach kept the right-side slot reserved and
+                forced the title to truncate ~40px earlier than it had
+                to. With display:none the title can use the full row
+                width when not hovered, and the count overlays via
+                absolute positioning on hover so the title doesn't
+                shift when it appears. */}
             {node.memory_count > 0 && (
-              <span className="ml-auto text-[11px] text-muted-foreground/70 shrink-0 tabular-nums opacity-0 group-hover/row:opacity-100 transition-opacity">
+              <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
                 {node.memory_count} memories
               </span>
             )}
@@ -293,7 +296,7 @@ function PrefixGroup({ prefix, items, activePageId, onNavigate, indent }: Prefix
     <div>
       <button
         onClick={() => setUserExpanded((v) => !v)}
-        className="group/row flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+        className="group/row relative flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
         style={{ paddingLeft: `${10 + indent * 14}px` }}
         aria-expanded={expanded}
       >
@@ -304,8 +307,9 @@ function PrefixGroup({ prefix, items, activePageId, onNavigate, indent }: Prefix
         )}
         <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         <span className="truncate flex-1 font-medium">{prefix}</span>
-        {/* Folder counts — same hover-only treatment as leaf rows. */}
-        <span className="text-[11px] text-muted-foreground/70 shrink-0 tabular-nums opacity-0 group-hover/row:opacity-100 transition-opacity">
+        {/* Folder counts — overlay on hover, no width reserved when
+            hidden so the prefix gets the whole row to truncate against. */}
+        <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
           {items.length} pages
           {totalMemories > 0 && ` · ${totalMemories} memories`}
         </span>
