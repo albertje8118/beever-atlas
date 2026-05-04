@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WikiTopicKindSchema",
+  "description": "Structured payload for topic-kind wiki pages — agents read this for retrieval; humans read content_md.",
+  "type": "object",
+  "required": ["summary"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "TL;DR — what the team should remember about this topic. <500 chars."
+    },
+    "key_decisions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "key_people": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "key_dates": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    }
+  }
+}

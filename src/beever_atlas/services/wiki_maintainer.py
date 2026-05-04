@@ -28,15 +28,229 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/wiki-maintainer/``
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from beever_atlas.models.persistence import WikiPage, WikiPageSection
 from beever_atlas.wiki.page_store import WikiPageStore
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# wiki-llm-native-redesign — per-kind prompt + schema dispatch
+# ---------------------------------------------------------------------------
+# Kinds the redesign knows how to dispatch. Anything else falls through to
+# the legacy single-prompt path so unknown future kinds (or operator-edited
+# `kind` values) never crash the maintainer.
+_KNOWN_KINDS: frozenset[str] = frozenset(
+    {"topic", "entity", "decisions", "faq", "action_items"}
+)
+
+# Resolve at import time so tests cannot trip on cwd changes.
+_WIKI_RESOURCE_ROOT: Path = Path(__file__).resolve().parent.parent / "wiki"
+_PROMPT_DIR: Path = _WIKI_RESOURCE_ROOT / "prompts"
+_SCHEMA_DIR: Path = _WIKI_RESOURCE_ROOT / "schemas"
+
+
+@lru_cache(maxsize=None)
+def _load_kind_prompt(kind: str) -> str:
+    """Read the per-kind synthesis prompt template from disk.
+
+    Cached because the prompt files are static — re-reading on every
+    apply_update call is wasted I/O. Tests that modify prompts at runtime
+    must call ``_load_kind_prompt.cache_clear()``.
+    """
+    if kind not in _KNOWN_KINDS:
+        raise KeyError(f"unknown wiki kind: {kind!r}")
+    path = _PROMPT_DIR / f"{kind}.txt"
+    return path.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=None)
+def _load_kind_schema(kind: str) -> dict[str, Any]:
+    if kind not in _KNOWN_KINDS:
+        raise KeyError(f"unknown wiki kind: {kind!r}")
+    path = _SCHEMA_DIR / f"{kind}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _validate_kind_schema(kind: str, payload: Any) -> str | None:
+    """Validate ``payload`` against the kind's JSON Schema.
+
+    Returns None on success, a one-line error suitable for the retry
+    prompt on failure. ``jsonschema`` is a transitive dep so we import
+    it lazily — module import time should not pay for this branch.
+    """
+    import jsonschema
+
+    if not isinstance(payload, dict):
+        return f"kind_schema must be a JSON object, got {type(payload).__name__}"
+    schema = _load_kind_schema(kind)
+    try:
+        jsonschema.validate(payload, schema)
+    except jsonschema.ValidationError as exc:
+        path_repr = "/".join(str(p) for p in exc.absolute_path) or "root"
+        return f"{exc.message} (at {path_repr})"
+    return None
+
+
+def _derive_kind_from_page_id(page_id: str) -> str:
+    """Map a structural ``page_id`` to its synthesis kind.
+
+    Bridges the migration window: legacy pages have ``kind`` defaulted
+    to ``"topic"`` regardless of their actual structure. The dispatcher
+    consults this helper for pages whose stored ``kind`` is the default
+    so an entity / decisions / faq / action-items page is dispatched
+    to its correct prompt before the migration script runs.
+    """
+    if not page_id:
+        return "topic"
+    if page_id.startswith("entity:"):
+        return "entity"
+    if page_id == "decisions":
+        return "decisions"
+    if page_id == "faq":
+        return "faq"
+    if page_id == "action-items":
+        return "action_items"
+    return "topic"
+
+
+def _resolve_dispatch_kind(page: "WikiPage") -> str:
+    """Pick the dispatch kind for a page.
+
+    Explicitly-set kinds (operator split / merge / first-touch on a new
+    redesigned page) win. Pages whose ``kind`` is the model default
+    (``"topic"``) fall back to a structural derivation from ``page_id``,
+    so legacy pages are dispatched correctly without a migration.
+    """
+    if page.kind and page.kind != "topic":
+        return page.kind
+    return _derive_kind_from_page_id(page.page_id)
+
+
+def _parse_affected_sections_from_obj(
+    parsed: dict[str, Any],
+) -> list["WikiPageSection"]:
+    """Extract ``affected_sections`` from a parsed response object.
+
+    Shared helper used by both the legacy parser and the per-kind parser
+    so the section-merge contract stays identical across paths.
+    """
+    affected_raw = parsed.get("affected_sections")
+    if not isinstance(affected_raw, list):
+        return []
+    out: list[WikiPageSection] = []
+    for entry in affected_raw:
+        if not isinstance(entry, dict):
+            continue
+        section_id = str(entry.get("id", "")).strip()
+        content_md = str(entry.get("content_md", "")).strip()
+        if not section_id or not content_md:
+            continue
+        title = str(entry.get("title", "")).strip() or section_id.title()
+        out.append(
+            WikiPageSection(
+                id=section_id,
+                title=title,
+                content_md=content_md,
+            )
+        )
+    return out
+
+
+def _parse_kind_response(
+    raw: str,
+) -> tuple[list["WikiPageSection"], dict[str, Any] | None]:
+    """Parse the per-kind LLM response into (sections, kind_schema).
+
+    ``kind_schema`` is None when the response was unparseable, lacked
+    a ``kind_schema`` key, or carried a non-object value there. The
+    caller decides whether to retry, fall through, or save the page
+    without the structured payload.
+    """
+    if not raw:
+        return [], None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "event=wiki_kind_response_parse_failed raw_len=%d", len(raw)
+        )
+        return [], None
+    if not isinstance(parsed, dict):
+        return [], None
+    sections = _parse_affected_sections_from_obj(parsed)
+    kind_schema_raw = parsed.get("kind_schema")
+    kind_schema: dict[str, Any] | None = (
+        kind_schema_raw if isinstance(kind_schema_raw, dict) else None
+    )
+    return sections, kind_schema
+
+
+def _render_kind_prompt(
+    kind: str,
+    page: "WikiPage",
+    new_facts: list[dict[str, Any]],
+    *,
+    target_lang: str = "en",
+    retry_validation_error: str | None = None,
+) -> str:
+    """Build the per-kind apply_update prompt.
+
+    Mirrors ``_render_apply_update_prompt``'s payload shape so the LLM
+    sees a familiar structure; the system prompt switches per kind.
+    Includes the prior ``kind_schema`` so the LLM can update it
+    incrementally rather than rebuild from scratch on each touch.
+    """
+    system = _load_kind_prompt(kind)
+    payload: dict[str, Any] = {
+        "page": {
+            "page_id": page.page_id,
+            "title": page.title,
+            "slug": page.slug,
+            "voice_seed": page.page_voice_seed or "",
+            "page_voice_seed": page.page_voice_seed or "",
+            "target_lang": target_lang,
+            "last_facts_seen": list(page.last_facts_seen),
+            "sections": [
+                {"id": s.id, "title": s.title, "content_md": s.content_md}
+                for s in page.sections
+            ],
+            "prior_kind_schema": page.kind_schema,
+        },
+        "new_facts": [
+            {
+                "id": f.get("id", ""),
+                "memory_text": f.get("memory_text", ""),
+                "cluster_id": f.get("cluster_id"),
+                "entity_tags": list(f.get("entity_tags") or []),
+                "fact_type": f.get("fact_type", ""),
+                "source_message_id": f.get("source_message_id", ""),
+            }
+            for f in new_facts
+        ],
+    }
+    out = (
+        system
+        + "\n\n--- INPUT ---\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+    if retry_validation_error:
+        out += (
+            "\n\n--- RETRY ---\n"
+            "Your previous response failed kind_schema validation:\n"
+            f"  {retry_validation_error}\n"
+            "Re-emit the entire JSON object with kind_schema fixed.\n"
+        )
+    out += "\n\n--- OUTPUT (JSON only) ---\n"
+    return out
 
 
 def _slug_for_topic(cluster_id: str) -> str:
@@ -547,6 +761,7 @@ class WikiMaintainer:
                 page_id=page_id,
                 title=await self._resolve_first_touch_title(page_id, channel_id),
                 slug=page_id.replace(":", "-"),
+                kind=_derive_kind_from_page_id(page_id),
                 sections=[
                     WikiPageSection(
                         id="overview",
@@ -556,27 +771,63 @@ class WikiMaintainer:
                 ],
             )
 
-        prompt = _render_apply_update_prompt(page, new_facts, target_lang=target_lang)
-        try:
-            raw = await self._invoke_apply_update_llm(prompt)
-        except Exception as exc:  # noqa: BLE001 — leave page unchanged on any LLM error
-            logger.exception(
-                "event=wiki_maintainer_apply_update_llm_failed channel_id=%s page_id=%s err=%s",
-                channel_id,
-                page_id,
-                exc,
-            )
-            self._record_apply_update_failure(channel_id, page_id, exc)
-            return False
+        # ---- per-kind dispatch (wiki-llm-native-redesign §3.8) ----
+        # When the redesign flag is OFF, OR the resolved kind isn't one of
+        # the known kinds, fall through to the legacy single-prompt path.
+        # Behaviour on the legacy branch is byte-identical to pre-redesign.
+        from beever_atlas.infra.config import get_settings
 
-        affected_sections = _parse_apply_update_response(raw)
+        settings = get_settings()
+        dispatch_kind = _resolve_dispatch_kind(page)
+        use_kind_dispatch = (
+            settings.wiki_llm_native_redesign and dispatch_kind in _KNOWN_KINDS
+        )
+
+        new_kind_schema: dict[str, Any] | None = None
+        affected_sections: list[WikiPageSection]
+        if use_kind_dispatch:
+            try:
+                affected_sections, new_kind_schema = (
+                    await self._invoke_kind_dispatch_with_retry(
+                        channel_id=channel_id,
+                        page=page,
+                        new_facts=new_facts,
+                        kind=dispatch_kind,
+                        target_lang=target_lang,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — leave page unchanged on any LLM error
+                logger.exception(
+                    "event=wiki_maintainer_apply_update_llm_failed channel_id=%s page_id=%s err=%s",
+                    channel_id,
+                    page_id,
+                    exc,
+                )
+                self._record_apply_update_failure(channel_id, page_id, exc)
+                return False
+        else:
+            prompt = _render_apply_update_prompt(
+                page, new_facts, target_lang=target_lang
+            )
+            try:
+                raw = await self._invoke_apply_update_llm(prompt)
+            except Exception as exc:  # noqa: BLE001 — leave page unchanged on any LLM error
+                logger.exception(
+                    "event=wiki_maintainer_apply_update_llm_failed channel_id=%s page_id=%s err=%s",
+                    channel_id,
+                    page_id,
+                    exc,
+                )
+                self._record_apply_update_failure(channel_id, page_id, exc)
+                return False
+            affected_sections = _parse_apply_update_response(raw)
+
         if not affected_sections:
             logger.warning(
                 "event=wiki_maintainer_apply_update_no_affected_sections channel_id=%s "
-                "page_id=%s raw_len=%d",
+                "page_id=%s",
                 channel_id,
                 page_id,
-                len(raw or ""),
             )
             self._record_apply_update_failure(
                 channel_id, page_id, ValueError("no_affected_sections")
@@ -601,6 +852,12 @@ class WikiMaintainer:
         page.last_facts_seen = sorted(set(page.last_facts_seen) | set(truly_new))
         page.is_dirty = False
         page.updated_at = datetime.now(tz=UTC)
+        # On the kind-dispatch path, persist the structured payload too.
+        # The flag-OFF / unknown-kind branch leaves ``kind`` and
+        # ``kind_schema`` untouched so legacy behaviour stays byte-identical.
+        if use_kind_dispatch:
+            page.kind = dispatch_kind
+            page.kind_schema = new_kind_schema  # may be None on 2x validation failure
         # title, slug, page_voice_seed are intentionally NOT touched here —
         # the LLM contract returns ONLY affected sections, and the merge
         # path only rewrites sections by id. Voice preservation is a
@@ -621,6 +878,68 @@ class WikiMaintainer:
                 page_id,
             )
         return True
+
+    async def _invoke_kind_dispatch_with_retry(
+        self,
+        *,
+        channel_id: str,
+        page: "WikiPage",
+        new_facts: list[dict[str, Any]],
+        kind: str,
+        target_lang: str,
+    ) -> tuple[list["WikiPageSection"], dict[str, Any] | None]:
+        """Invoke the per-kind apply_update LLM call with one schema-retry.
+
+        Returns ``(affected_sections, kind_schema)``. ``kind_schema`` is
+        None when both attempts failed JSON Schema validation — the caller
+        keeps the markdown sections (so the page is still updated) and a
+        ``wiki_kind_schema_validation_failed`` warning is emitted. The LLM
+        invocation reuses ``_invoke_apply_update_llm`` so tests that
+        monkeypatch the legacy hook also exercise this path.
+        """
+        last_validation_error: str | None = None
+        affected_sections: list[WikiPageSection] = []
+
+        for attempt in (0, 1):
+            prompt = _render_kind_prompt(
+                kind,
+                page,
+                new_facts,
+                target_lang=target_lang,
+                retry_validation_error=(
+                    last_validation_error if attempt == 1 else None
+                ),
+            )
+            raw = await self._invoke_apply_update_llm(prompt)
+            attempt_sections, attempt_schema = _parse_kind_response(raw)
+
+            # Always honor the most recent affected_sections — even if both
+            # attempts fail schema validation, the markdown body should
+            # still land so the page is not silently stuck.
+            affected_sections = attempt_sections
+
+            if attempt_schema is None:
+                last_validation_error = (
+                    "response missing or non-object kind_schema"
+                )
+                continue
+            error = _validate_kind_schema(kind, attempt_schema)
+            if error is None:
+                return affected_sections, attempt_schema
+            last_validation_error = error
+
+        logger.warning(
+            "event=wiki_kind_schema_validation_failed channel_id=%s page_id=%s "
+            "kind=%s err=%s",
+            channel_id,
+            page.page_id,
+            kind,
+            last_validation_error,
+        )
+        # Both attempts failed validation — return markdown so the page
+        # body still updates; kind_schema stays None so the agent surface
+        # exposes the degraded state honestly.
+        return affected_sections, None
 
     async def _invoke_apply_update_llm(self, prompt: str) -> str:
         """Single LLM call for ``apply_update``. Override in tests.

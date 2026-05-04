@@ -36,6 +36,9 @@ def _patch_settings(monkeypatch, *, drift_ab: bool, rate_limit: int = 60) -> Non
     fake = SimpleNamespace(
         wiki_drift_ab=drift_ab,
         wiki_drift_ab_rate_limit_seconds=rate_limit,
+        # Drift A/B tests exercise the legacy single-prompt apply_update
+        # path; the per-kind dispatcher must stay OFF for them.
+        wiki_llm_native_redesign=False,
     )
     monkeypatch.setattr("beever_atlas.infra.config.get_settings", lambda: fake)
 
