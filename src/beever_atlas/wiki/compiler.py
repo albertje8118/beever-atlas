@@ -124,14 +124,33 @@ def _slugify(text: str) -> str:
     return slug[:80]
 
 
+_SLACK_TS_RE = re.compile(r"^\d+\.\d+$")
+
+
 def _build_permalink(fact: AtomicFact) -> str:
-    """Build a best-effort permalink to the original message."""
+    """Build a best-effort permalink to the original message.
+
+    Only Slack permalinks can be built deterministically because Slack
+    URLs are channel-id + timestamp and need no per-tenant base URL.
+    Mattermost / Teams / Discord need server URL + team-name + post id
+    to build a real permalink — none of which live on ``AtomicFact``,
+    so we return ``""`` and the citation chip falls back to a non-link
+    chip on the frontend.
+
+    Defensive timestamp check: ``fact.platform`` historically defaults
+    to ``"slack"`` in several adapter paths even when the data came
+    from Mattermost (issue surfaced when self-hosted Mattermost
+    citations linked out to ``app.slack.com`` and broke). We guard by
+    requiring a Slack-shaped ``message_ts`` (``\\d+\\.\\d+`` —
+    unix-seconds with a fractional part) before emitting a Slack URL.
+    Mattermost timestamps are ISO-8601 (``2026-04-15T20:27:39.576+00:00``)
+    and don't match, so the broken cross-platform URL no longer escapes.
+    """
     if not fact.source_message_id and not fact.message_ts:
         return ""
-    # For Slack: https://slack.com/archives/{channel}/{message_ts}
-    if fact.platform == "slack" and fact.channel_id:
-        ts = fact.message_ts.replace(".", "p") if fact.message_ts else ""
-        if ts:
+    if fact.platform == "slack" and fact.channel_id and fact.message_ts:
+        if _SLACK_TS_RE.match(fact.message_ts):
+            ts = fact.message_ts.replace(".", "p")
             return f"https://app.slack.com/archives/{fact.channel_id}/{ts}"
     return ""
 
