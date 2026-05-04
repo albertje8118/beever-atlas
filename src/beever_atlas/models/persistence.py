@@ -375,5 +375,45 @@ class WikiPage(BaseModel):
     GETs, the maintainer routes future facts to the target, and the
     page is hidden from human nav. ``None`` is the normal case."""
 
+    # ---- llm-wiki-folder-structure fields --------------------------------
+    # Folder pages are first-class wiki pages whose ``page_type`` (carried
+    # on the domain WikiPage; persistence model derives via ``kind``) is
+    # ``folder``. They synthesize a 200-400 word index page AND maintain
+    # a ``children`` list of immediate descendants. ``children_fingerprint``
+    # is a SHA-256 of sorted child slugs used by the maintainer + compiler
+    # to skip redundant folder-index re-synthesis when membership hasn't
+    # changed. ``is_synthetic`` distinguishes planner-produced folders
+    # from hand-curated ones (future).
+    page_type: str = "topic"
+    """Page type — ``"fixed"`` | ``"topic"`` | ``"sub-topic"`` | ``"folder"``.
+    Persistence layer holds the same value the domain WikiPage model uses
+    so the cache → API round-trip preserves it. Defaults to ``topic``
+    because that's the most common kind for legacy rows; the legacy
+    ``kind`` field is the LLM-prompt selector and is independent."""
+
+    parent_id: str | None = None
+    """Immediate parent page id (folder id, topic id, or fixed-root id).
+    Null for root-level pages. Generalizes the old "topic owns its
+    sub-topics" rule to "any page can be a child of any folder"."""
+
+    children: list[dict[str, Any]] = Field(default_factory=list)
+    """Ordered immediate-child references for folder pages. Each entry
+    is ``{slug, title, page_type, section_number}``. Empty for
+    non-folder pages. Persisted as raw dicts (not WikiPageRef) so the
+    persistence layer can evolve the ref shape without breaking on-disk
+    data — the domain layer's WikiPageRef validates the shape on read."""
+
+    children_fingerprint: str | None = None
+    """SHA-256 hex of the sorted child slugs of a folder page. The
+    compiler skips folder-index re-synthesis when the new fingerprint
+    matches the stored value AND the row already has non-empty content.
+    Null on non-folder pages."""
+
+    is_synthetic: bool = False
+    """``True`` when this page (typically a folder) was produced by the
+    structure planner; ``False`` for hand-curated or legacy pages.
+    Surfaced in the UI as a hint that the agent owns the structure
+    decision."""
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

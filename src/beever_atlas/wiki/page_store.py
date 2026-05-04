@@ -27,6 +27,25 @@ from beever_atlas.models.persistence import WikiPage, WikiPageSection, WikiTensi
 logger = logging.getLogger(__name__)
 
 
+def _canonical_page_path(doc: dict[str, Any]) -> str:
+    """Return the canonical ``/wiki/...`` path for a stored page doc.
+
+    For root-level pages the path is ``/wiki/<slug>``. For nested pages
+    we encode the immediate parent in the path (``/wiki/<parent_id>/<slug>``)
+    so a leaf moving from ``parent=null`` to ``parent=folder-X`` writes
+    a redirect row keyed off the old parent-less path. The frontend
+    resolves redirects via slug lookup anyway — this canonical path is
+    just a deterministic key for the redirect index.
+    """
+    slug = doc.get("slug") or doc.get("page_id") or ""
+    if not slug:
+        return ""
+    parent = doc.get("parent_id")
+    if parent:
+        return f"/wiki/{parent}/{slug}"
+    return f"/wiki/{slug}"
+
+
 class WikiPageStore:
     """Per-page accessor over the ``wiki_pages`` collection.
 
@@ -42,8 +61,13 @@ class WikiPageStore:
         # callers must call ``bind_db`` before any read/write.
         self._db = db
         self._collection: Any = None
+        # Sibling collection for path-redirect entries written when a
+        # leaf moves between folders during a structure-planner pass.
+        # See ``llm-wiki-folder-structure`` change spec.
+        self._redirects: Any = None
         if db is not None:
             self._collection = db["wiki_pages"]
+            self._redirects = db["wiki_redirects"]
 
     @classmethod
     def from_client(
@@ -54,6 +78,7 @@ class WikiPageStore:
     def bind_db(self, db: AsyncIOMotorDatabase) -> None:
         self._db = db
         self._collection = db["wiki_pages"]
+        self._redirects = db["wiki_redirects"]
 
     async def ensure_indexes(self) -> None:
         if self._collection is None:
@@ -97,6 +122,19 @@ class WikiPageStore:
             [("channel_id", 1), ("kind", 1), ("updated_at", -1)],
             name="wiki_pages_channel_kind_updated",
         )
+        # ``llm-wiki-folder-structure`` — wiki_redirects collection.
+        # Compound unique key on (channel_id, target_lang, old_path)
+        # so chained moves of the same path overwrite (latest wins);
+        # ``resolve_redirect`` then chases ``new_path`` forward up to
+        # a small depth bound. The collection may be empty during the
+        # rollout window before any folder moves occur.
+        redirects = getattr(self, "_redirects", None)
+        if redirects is not None:
+            await redirects.create_index(
+                [("channel_id", 1), ("target_lang", 1), ("old_path", 1)],
+                unique=True,
+                name="wiki_redirects_compound_unique",
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -153,9 +191,32 @@ class WikiPageStore:
         refresh, and Pydantic's ``default_factory`` would set a new
         ``datetime.now()`` every time — putting it in ``$set`` would
         overwrite the genuine first-creation timestamp on every save.
+
+        ``llm-wiki-folder-structure`` Phase A add-on: when the saved
+        page's canonical path differs from its previously-stored path
+        (typically because a leaf has moved between folders during a
+        structure-planner pass), a row is written to the
+        ``wiki_redirects`` collection so existing wikilinks continue
+        to resolve via ``WikiPageStore.resolve_redirect``. Self-
+        redirects are filtered at write time. The fingerprint-aware
+        body-preservation optimization for folder pages lands in
+        Phase C alongside ``_compile_folder_page``.
         """
         if self._collection is None:
             raise RuntimeError("WikiPageStore not bound to a database")
+
+        # Read the prior row once so we can detect path changes for
+        # the redirect bookkeeping below. This is a small extra read,
+        # but it's not on the hot path (save_page runs once per page
+        # per regenerate / maintain cycle, not per request).
+        prior: dict[str, Any] | None = await self._collection.find_one(
+            {
+                "channel_id": page.channel_id,
+                "target_lang": page.target_lang,
+                "page_id": page.page_id,
+            }
+        )
+
         # Build the $set document WITHOUT version OR created_at.
         # $inc handles version; $setOnInsert handles created_at.
         doc = page.model_dump(mode="json")
@@ -176,6 +237,80 @@ class WikiPageStore:
             update,
             upsert=True,
         )
+
+        # Path-change → redirect row. The old path uses the prior row's
+        # parent_id + slug; the new path uses the freshly-written doc.
+        # Self-redirects (no path change) are silently dropped so the
+        # collection stays small.
+        redirects = getattr(self, "_redirects", None)
+        if prior is not None and redirects is not None:
+            old_path = _canonical_page_path(prior)
+            new_path = _canonical_page_path(doc)
+            if old_path and new_path and old_path != new_path:
+                await redirects.update_one(
+                    {
+                        "channel_id": page.channel_id,
+                        "target_lang": page.target_lang,
+                        "old_path": old_path,
+                    },
+                    {
+                        "$set": {
+                            "new_path": new_path,
+                            "created_at": datetime.now(tz=UTC).isoformat(),
+                        },
+                        "$setOnInsert": {
+                            "channel_id": page.channel_id,
+                            "target_lang": page.target_lang,
+                            "old_path": old_path,
+                        },
+                    },
+                    upsert=True,
+                )
+
+    async def resolve_redirect(
+        self, channel_id: str, target_lang: str, path: str
+    ) -> str | None:
+        """Resolve a redirect chain to its latest target.
+
+        Returns the latest known ``new_path`` for the given ``path``, or
+        ``None`` when no redirect is registered. Chases up to 16 hops
+        before giving up — a safety bound to prevent unbounded loops if
+        a write produces a cycle (which shouldn't be possible given the
+        unique index on ``(channel_id, target_lang, old_path)`` but the
+        bound is cheap to enforce).
+
+        Self-redirects are filtered at write time, so a ``None`` return
+        always means "no redirect for this path", never "redirects to
+        itself".
+        """
+        redirects = getattr(self, "_redirects", None)
+        if redirects is None or not path:
+            return None
+        seen: set[str] = set()
+        current = path
+        for _ in range(16):
+            if current in seen:
+                # Cycle detected — bail and return last known target so
+                # callers don't loop forever.
+                return current
+            seen.add(current)
+            doc = await redirects.find_one(
+                {
+                    "channel_id": channel_id,
+                    "target_lang": target_lang,
+                    "old_path": current,
+                }
+            )
+            if doc is None:
+                # First miss is the answer: ``current`` is the latest
+                # target if we've followed at least one redirect, else
+                # we found nothing for the original ``path``.
+                return current if current != path else None
+            next_path = doc.get("new_path")
+            if not next_path or next_path == current:
+                return current if current != path else None
+            current = next_path
+        return current
 
     async def mark_dirty(
         self, channel_id: str, page_ids: list[str], target_lang: str = "en"

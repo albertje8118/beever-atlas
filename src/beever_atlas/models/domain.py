@@ -237,20 +237,43 @@ class WikiPageRef(BaseModel):
 
 
 class WikiPage(BaseModel):
-    """A single wiki page with enhanced Markdown content."""
+    """A single wiki page with enhanced Markdown content.
 
-    id: str  # "overview", "people", "topic-authentication", "topic-auth--jwt-migration"
+    ``page_type`` accepts ``"fixed"`` | ``"topic"`` | ``"sub-topic"`` |
+    ``"folder"``. Folder pages are first-class wiki pages produced by
+    the structure planner (``llm-wiki-folder-structure`` change) — they
+    have their own synthesized index content AND a ``children`` list
+    of immediate descendants. ``children_fingerprint`` lets the
+    compiler/maintainer skip redundant folder-index re-synthesis when
+    the child set is unchanged.
+    """
+
+    id: str  # "overview", "people", "topic-authentication", "topic-auth--jwt-migration", "folder-security"
     slug: str
     title: str
-    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic"
+    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic" | "folder"
     parent_id: str | None = None
-    section_number: str = ""  # "1", "2.1", "2.1.1"
+    section_number: str = ""  # "1", "2.1", "2.1.1", "2.1.1.1" (arbitrary-depth path)
     content: str = ""  # Enhanced Markdown (mermaid/chart/callout/media blocks)
     summary: str = ""  # 1-2 sentence summary for cards/tooltips
     memory_count: int = 0
     last_updated: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     citations: list[WikiCitation] = Field(default_factory=list)
     children: list[WikiPageRef] = Field(default_factory=list)
+
+    # Folder-only metadata. Both default-None on non-folder pages so the
+    # JSON shape stays compact for leaves (Pydantic's default
+    # ``model_dump`` includes None fields, but the persistence layer
+    # filters those out before write — see WikiPageStore.save_page).
+    children_fingerprint: str | None = None
+    is_synthetic: bool = False
+
+    @property
+    def is_folder(self) -> bool:
+        """True when this page is a structure-planner folder (or
+        hand-curated folder, future). Convenience for compile/render
+        dispatch — keeps callers from string-comparing ``page_type``."""
+        return self.page_type == "folder"
 
 
 class WikiPageNode(BaseModel):
@@ -260,9 +283,10 @@ class WikiPageNode(BaseModel):
     title: str
     slug: str
     section_number: str
-    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic"
+    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic" | "folder"
     memory_count: int = 0
     children: list["WikiPageNode"] = Field(default_factory=list)
+    is_synthetic: bool = False
 
 
 class WikiStructure(BaseModel):
