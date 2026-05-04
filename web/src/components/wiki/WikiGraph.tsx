@@ -491,23 +491,20 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                 "text-max-width": "100px",
                 "text-outline-color": "#0f172a",
                 "text-outline-width": 1.5,
-                // Card body: dark slate fill so the colored ribbon pops.
-                "background-color": "#1e293b",
-                // Left ribbon = per-kind color as a left-edge overlay.
-                // Cytoscape doesn't have a native ribbon primitive, so
-                // we use background-gradient with a hard stop at 5px.
-                // The ribbon is 5px wide on a 78px card = ~6.4%.
-                "background-fill": "linear-gradient" as unknown as "solid",
-                "background-gradient-stop-colors": ["data(color)" as unknown as string, "data(color)" as unknown as string, "#1e293b", "#1e293b"],
-                "background-gradient-stop-positions": [0, 7, 7, 100] as unknown as number[],
-                "background-gradient-direction": "to-right" as unknown as string,
-                // Page icon centered on the card body (right of ribbon)
+                // Solid kind-color body. The previous attempt at a
+                // gradient-ribbon (linear-gradient + data(color) stops)
+                // crashed cytoscape's parser ("Cannot read properties
+                // of null reading 'value'") because data() accessors
+                // can't be interleaved with literal hex inside the
+                // gradient stop arrays. Solid color reads just as
+                // distinctly with the white-stroked icon on top.
+                "background-color": "data(color)",
+                "background-opacity": 0.92,
                 "background-image": "data(icon)",
                 "background-fit": "contain",
-                "background-image-opacity": 0.8,
-                "background-position-x": "55%",
+                "background-image-opacity": 0.95,
                 "background-width": "45%",
-                "background-height": "50%",
+                "background-height": "55%",
                 width: "data(nodeWidth)" as unknown as number,
                 height: "data(nodeHeight)" as unknown as number,
                 "border-width": 1,
