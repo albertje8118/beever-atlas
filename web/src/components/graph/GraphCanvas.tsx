@@ -1,5 +1,25 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
+// fcose: better organic spread than vanilla cose. Drop-in extension
+// — register once at module load, then use ``layout: { name: "fcose" }``.
+// We use a ``// @ts-expect-error`` for the import because the
+// package ships untyped JS; runtime registration works fine.
+// @ts-expect-error — cytoscape-fcose has no published .d.ts
+import fcose from "cytoscape-fcose";
+
+// Idempotent — multiple module loads (HMR, route remounts) are safe.
+let _fcoseRegistered = false;
+function ensureFcose() {
+  if (_fcoseRegistered) return;
+  try {
+    cytoscape.use(fcose);
+    _fcoseRegistered = true;
+  } catch {
+    /* already registered in another bundle — ignore */
+    _fcoseRegistered = true;
+  }
+}
+ensureFcose();
 import type { GraphEntity, GraphRelationship } from "@/hooks/useGraph";
 import { getTypeColors } from "./GraphFilters";
 
@@ -322,29 +342,43 @@ export function GraphCanvas({
             // cose converge slowly enough that the spread settles
             // instead of collapsing back. componentSpacing 250 keeps
             // disconnected components meaningfully separated.
-            name: "cose",
-            animate: "end",
+            // fcose — Obsidian-style organic spread. Vanilla cose
+            // produced concentrated blobs no matter how aggressively
+            // we tuned the ratio (the user verified this across four
+            // attempts). fcose's incremental quality + spectral seed
+            // gives a meaningfully more open default. Tuned per
+            // fcose docs:
+            //   • nodeSeparation 100 → real breathing room between
+            //     non-adjacent nodes
+            //   • idealEdgeLength 120 → connected pairs sit closer
+            //     than non-adjacent ones; pairs with the high
+            //     nodeSeparation, this produces clusters with gaps
+            //   • nodeRepulsion 8500 → fcose's units are ~40x smaller
+            //     than cose's, so values look very different
+            //   • gravity 0.15 + gravityRange 3.8 → mild central pull
+            //     so the graph stays in the viewport without
+            //     collapsing
+            //   • quality "default" → spectral seed, not random
+            name: "fcose",
+            animate: true,
             animationDuration: 800,
-            animationEasing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction,
+            animationEasing: "ease-out",
+            quality: "default",
             randomize: true,
             nodeDimensionsIncludeLabels: true,
-            // 300k repulsion + 500 ideal edge gives ratio ~600 — much
-            // higher than the prior 140k/280=500 pass. Combined with
-            // gravity 0.05 the connected core actually breathes
-            // outward. coolingFactor 0.99 keeps the simulation from
-            // snapping back during the late-stage relaxation; numIter
-            // 4500 gives it time to actually settle into the open
-            // arrangement instead of stopping mid-spread.
-            nodeRepulsion: () => 300000,
-            idealEdgeLength: () => 500,
-            edgeElasticity: () => 30,
-            gravity: 0.05,
-            componentSpacing: 250,
-            coolingFactor: 0.99,
-            numIter: 4500,
-            padding: 80,
+            uniformNodeDimensions: false,
+            packComponents: true,
+            nodeSeparation: 100,
+            idealEdgeLength: 120,
+            edgeElasticity: 0.45,
+            nodeRepulsion: 8500,
+            gravity: 0.15,
+            gravityRange: 3.8,
+            numIter: 2500,
+            tile: false,
+            padding: 60,
             fit: true,
-          } as cytoscape.LayoutOptions,
+          } as unknown as cytoscape.LayoutOptions,
       // Lower minZoom so the aggressively-spread layout doesn't get
       // crushed back into a dot-cluster by ``fit:true``. 0.12 is the
       // floor; below that nodes become single-pixel motes.
