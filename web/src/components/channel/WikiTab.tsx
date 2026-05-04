@@ -20,6 +20,7 @@ import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
 import { useChannelPolicy } from "@/hooks/useChannelPolicy";
 import { WikiLayout } from "@/components/wiki/WikiLayout";
 import { WikiHealthToolbar } from "@/components/wiki/WikiHealthToolbar";
+import { SegmentedToggle } from "@/components/shared/SegmentedToggle";
 import { OverviewPage } from "@/components/wiki/OverviewPage";
 import { TopicPage } from "@/components/wiki/TopicPage";
 import { GenericPage } from "@/components/wiki/GenericPage";
@@ -36,55 +37,10 @@ interface LanguageConfig {
 
 type WikiView = "pages" | "graph";
 
-interface ViewToggleProps {
-  view: WikiView;
-  onChange: (next: WikiView) => void;
-}
-
-/**
- * Pages↔Graph view toggle for the wiki tab. Renders inside the
- * ``headerExtra`` slot above the WikiHealthToolbar. The graph
- * surface is the cross-link wiki graph (NOT the entity graph —
- * that lives under Agent Memory now).
- */
-function ViewToggle({ view, onChange }: ViewToggleProps) {
-  return (
-    <div
-      className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-0.5"
-      role="tablist"
-      aria-label="Wiki view"
-    >
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === "pages"}
-        onClick={() => onChange("pages")}
-        className={
-          "rounded px-3 py-1 text-xs font-medium transition-colors " +
-          (view === "pages"
-            ? "bg-primary text-primary-foreground"
-            : "text-muted-foreground hover:bg-muted")
-        }
-      >
-        Pages
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === "graph"}
-        onClick={() => onChange("graph")}
-        className={
-          "rounded px-3 py-1 text-xs font-medium transition-colors " +
-          (view === "graph"
-            ? "bg-primary text-primary-foreground"
-            : "text-muted-foreground hover:bg-muted")
-        }
-      >
-        Graph
-      </button>
-    </div>
-  );
-}
+const WIKI_VIEW_OPTIONS = [
+  { value: "pages" as const, label: "Pages", icon: BookOpen, testId: "wiki-view-toggle-pages" },
+  { value: "graph" as const, label: "Graph", icon: Network, testId: "wiki-view-toggle-graph" },
+];
 
 function WikiLoadingSkeleton() {
   return (
@@ -685,6 +641,42 @@ export function WikiTab() {
     [_structureForTopicPages],
   );
 
+  // Graph view = full-width canvas, NO wiki sidebar. The pages-list
+  // sidebar is irrelevant when the operator is in graph mode and only
+  // steals horizontal real-estate. Early-return short-circuits the
+  // whole WikiLayout chrome below. Channel hub + cytoscape don't need
+  // wiki data, so this is safe even while ``wiki`` is still loading.
+  if (view === "graph") {
+    return (
+      <div className="flex h-full flex-col min-h-0">
+        <div className="flex items-center justify-between border-b border-border bg-card/60 px-5 py-2 shrink-0">
+          <SegmentedToggle
+            ariaLabel="Wiki view"
+            value={view}
+            options={WIKI_VIEW_OPTIONS}
+            onChange={setView}
+          />
+        </div>
+        <div className="flex-1 min-h-0">
+          <FullscreenWrapper label="Enlarge graph">
+            <Suspense
+              fallback={
+                <div
+                  className="flex h-full items-center justify-center text-sm text-muted-foreground"
+                  data-testid="wiki-graph-suspense"
+                >
+                  Loading graph view…
+                </div>
+              }
+            >
+              <WikiGraph channelId={channelId} />
+            </Suspense>
+          </FullscreenWrapper>
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return <WikiLoadingSkeleton />;
   }
@@ -794,28 +786,7 @@ export function WikiTab() {
   // returns 404 (page exists in sidebar structure but has no cached content)
   // so the pane does not spin forever.
   let pageContent: ReactNode;
-  if (view === "graph") {
-    // Wiki cross-link graph view — lazy-loaded so cytoscape stays out
-    // of the wiki tab's main bundle until the operator toggles in.
-    // Wrapped in FullscreenWrapper so the operator can enlarge the
-    // canvas without losing the in-tab chrome.
-    pageContent = (
-      <FullscreenWrapper label="Enlarge graph">
-        <Suspense
-          fallback={
-            <div
-              className="flex h-full items-center justify-center text-sm text-muted-foreground"
-              data-testid="wiki-graph-suspense"
-            >
-              Loading graph view…
-            </div>
-          }
-        >
-          <WikiGraph channelId={channelId} />
-        </Suspense>
-      </FullscreenWrapper>
-    );
-  } else if (showPageLoading) {
+  if (showPageLoading) {
     pageContent = (
       <div className="flex items-center justify-center py-16">
         <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -867,7 +838,12 @@ export function WikiTab() {
       onVersionHistoryToggle={() => setVersionHistoryOpen((v) => !v)}
       headerExtra={
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          <ViewToggle view={view} onChange={setView} />
+          <SegmentedToggle
+            ariaLabel="Wiki view"
+            value={view}
+            options={WIKI_VIEW_OPTIONS}
+            onChange={setView}
+          />
           <WikiHealthToolbar
             channelId={channelId!}
             manualMode={manualMode}
