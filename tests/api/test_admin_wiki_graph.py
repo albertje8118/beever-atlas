@@ -211,59 +211,209 @@ async def test_entity_cross_edges_emit_references_entity_kind() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_endpoint_falls_back_to_empty_graph_when_backend_lacks_method() -> None:
-    """When stores.graph is a NullGraphStore / older NebulaStore that
-    doesn't expose ``get_wiki_graph``, the endpoint still returns 200
-    with empty arrays so the frontend route can render."""
-    from beever_atlas.api.wiki import get_wiki_graph
+def _fake_page(*, slug, title, kind="topic", cross_links=None, page_id=None):
+    """Build a minimal WikiPage fake with the fields the graph endpoint reads."""
+    from datetime import UTC, datetime as _dt
+    from types import SimpleNamespace as _SN
 
-    class _BareGraph:
-        pass
+    return _SN(
+        slug=slug,
+        title=title,
+        kind=kind,
+        version=1,
+        page_id=page_id or f"topic:{slug}",
+        cross_links=cross_links or {},
+        updated_at=_dt(2026, 5, 1, tzinfo=UTC),
+    )
 
-    fake_stores = type("S", (), {"graph": _BareGraph()})()
-    principal = type("P", (), {"id": "u-1"})()
 
+def _patch_endpoint_deps(*, pages, graph_backend):
+    """Common mock setup: WikiPageStore returns ``pages``; ``stores.graph``
+    is the supplied backend; assert_channel_access is a no-op; settings
+    + cache _load_page_store path is short-circuited."""
     from unittest.mock import patch
 
     async def _ok(*args, **kwargs):
         return None
 
-    with (
-        patch("beever_atlas.api.wiki.get_stores", return_value=fake_stores),
-        patch(
-            "beever_atlas.infra.channel_access.assert_channel_access",
-            new=AsyncMock(side_effect=_ok),
-        ),
-    ):
-        result = await get_wiki_graph("C1", principal=principal)
+    fake_store = AsyncMock()
+    fake_store.list_pages_by_kind = AsyncMock(return_value=list(pages))
+    fake_stores = type("S", (), {"graph": graph_backend})()
+
+    return patch.multiple(
+        "beever_atlas.api.wiki",
+        _load_page_store=AsyncMock(return_value=fake_store),
+        get_stores=lambda: fake_stores,
+        _resolve_target_lang=AsyncMock(return_value="en"),
+    ), patch(
+        "beever_atlas.infra.channel_access.assert_channel_access",
+        new=AsyncMock(side_effect=_ok),
+    )
+
+
+async def test_endpoint_returns_empty_when_no_pages_and_no_neo4j_parity() -> None:
+    """Empty Mongo + bare graph backend → empty payload."""
+    from beever_atlas.api.wiki import get_wiki_graph
+
+    class _BareGraph:
+        pass
+
+    principal = type("P", (), {"id": "u-1"})()
+    deps_patch, auth_patch = _patch_endpoint_deps(
+        pages=[], graph_backend=_BareGraph()
+    )
+    with deps_patch, auth_patch:
+        result = await get_wiki_graph("C1", target_lang="en", principal=principal)
     assert result == {"channel_id": "C1", "nodes": [], "edges": []}
 
 
-async def test_endpoint_swallows_neo4j_errors_with_empty_payload() -> None:
-    """A live Neo4j hiccup must not 500 the wiki graph route — the
-    operator's view of the wiki should not depend on a graph backend
-    being healthy."""
+async def test_endpoint_swallows_neo4j_errors_keeping_wiki_pages() -> None:
+    """A live Neo4j hiccup must not 500 the route — wiki page nodes
+    + their cross_links edges still come back from Mongo."""
     from beever_atlas.api.wiki import get_wiki_graph
 
     class _BoomGraph:
         async def get_wiki_graph(self, channel_id):
             raise RuntimeError("neo down")
 
-    fake_stores = type("S", (), {"graph": _BoomGraph()})()
-    principal = type("P", (), {"id": "u-1"})()
-
-    from unittest.mock import patch
-
-    async def _ok(*args, **kwargs):
-        return None
-
-    with (
-        patch("beever_atlas.api.wiki.get_stores", return_value=fake_stores),
-        patch(
-            "beever_atlas.infra.channel_access.assert_channel_access",
-            new=AsyncMock(side_effect=_ok),
+    pages = [
+        _fake_page(slug="topic-auth", title="Authentication"),
+        _fake_page(
+            slug="topic-sessions",
+            title="Sessions",
+            cross_links={"Authentication": "topic-auth"},
         ),
-    ):
-        result = await get_wiki_graph("C1", principal=principal)
-    assert result["nodes"] == []
+    ]
+    principal = type("P", (), {"id": "u-1"})()
+    deps_patch, auth_patch = _patch_endpoint_deps(
+        pages=pages, graph_backend=_BoomGraph()
+    )
+    with deps_patch, auth_patch:
+        result = await get_wiki_graph("C1", target_lang="en", principal=principal)
+    # Both wiki pages survived the Neo4j failure.
+    assert {n["data"]["id"] for n in result["nodes"]} == {"topic-auth", "topic-sessions"}
+    # And the references_wiki edge from sessions -> auth landed.
+    edges = [e for e in result["edges"] if e["data"]["kind"] == "references_wiki"]
+    assert len(edges) == 1
+    assert edges[0]["data"]["source"] == "topic-sessions"
+    assert edges[0]["data"]["target"] == "topic-auth"
+
+
+async def test_endpoint_builds_wiki_nodes_and_edges_from_mongo() -> None:
+    """Source-of-truth check — the endpoint reads wiki_pages from Mongo
+    and produces a node per page + a references_wiki edge per
+    cross_links entry. Works on legacy installs where Neo4j has no
+    WikiPage nodes yet."""
+    from beever_atlas.api.wiki import get_wiki_graph
+
+    class _BareGraph:
+        pass
+
+    pages = [
+        _fake_page(slug="topic-auth", title="Authentication"),
+        _fake_page(
+            slug="topic-sessions",
+            title="Sessions",
+            cross_links={"Authentication": "topic-auth"},
+        ),
+        _fake_page(
+            slug="entity-alice",
+            title="Alice",
+            kind="entity",
+            cross_links={
+                "Authentication": "topic-auth",
+                "Sessions": "topic-sessions",
+            },
+        ),
+    ]
+    principal = type("P", (), {"id": "u-1"})()
+    deps_patch, auth_patch = _patch_endpoint_deps(
+        pages=pages, graph_backend=_BareGraph()
+    )
+    with deps_patch, auth_patch:
+        result = await get_wiki_graph("C1", target_lang="en", principal=principal)
+
+    assert len(result["nodes"]) == 3
+    edges = [e for e in result["edges"] if e["data"]["kind"] == "references_wiki"]
+    assert len(edges) == 3
+    pairs = {(e["data"]["source"], e["data"]["target"]) for e in edges}
+    assert pairs == {
+        ("topic-sessions", "topic-auth"),
+        ("entity-alice", "topic-auth"),
+        ("entity-alice", "topic-sessions"),
+    }
+
+
+async def test_endpoint_drops_dangling_cross_link_edges() -> None:
+    """A cross_links entry pointing at a non-existent slug must NOT
+    emit a phantom edge — the renderer would attach the source to a
+    target node that doesn't exist."""
+    from beever_atlas.api.wiki import get_wiki_graph
+
+    class _BareGraph:
+        pass
+
+    pages = [
+        _fake_page(
+            slug="topic-auth",
+            title="Authentication",
+            cross_links={"Logging Strategy": "topic-logging"},  # dangling
+        ),
+    ]
+    principal = type("P", (), {"id": "u-1"})()
+    deps_patch, auth_patch = _patch_endpoint_deps(
+        pages=pages, graph_backend=_BareGraph()
+    )
+    with deps_patch, auth_patch:
+        result = await get_wiki_graph("C1", target_lang="en", principal=principal)
+    assert len(result["nodes"]) == 1
     assert result["edges"] == []
+
+
+async def test_endpoint_enriches_with_entity_edges_from_neo4j() -> None:
+    """When Neo4j has ``references_entity`` edges for visible wiki
+    nodes, the endpoint pulls them in and adds the entity nodes."""
+    from beever_atlas.api.wiki import get_wiki_graph
+
+    class _GraphWithEntityEdges:
+        async def get_wiki_graph(self, channel_id):
+            return {
+                "channel_id": channel_id,
+                "nodes": [
+                    {
+                        "data": {
+                            "id": "entity:Bob",
+                            "label": "Bob",
+                            "kind": "entity",
+                            "entity_type": "Person",
+                        }
+                    }
+                ],
+                "edges": [
+                    {
+                        "data": {
+                            "id": "e:topic-auth->entity:Bob",
+                            "source": "topic-auth",
+                            "target": "entity:Bob",
+                            "kind": "references_entity",
+                        }
+                    }
+                ],
+            }
+
+    pages = [_fake_page(slug="topic-auth", title="Authentication")]
+    principal = type("P", (), {"id": "u-1"})()
+    deps_patch, auth_patch = _patch_endpoint_deps(
+        pages=pages, graph_backend=_GraphWithEntityEdges()
+    )
+    with deps_patch, auth_patch:
+        result = await get_wiki_graph("C1", target_lang="en", principal=principal)
+
+    # Entity node + entity edge both present.
+    assert {n["data"]["id"] for n in result["nodes"]} == {"topic-auth", "entity:Bob"}
+    entity_edges = [
+        e for e in result["edges"] if e["data"]["kind"] == "references_entity"
+    ]
+    assert len(entity_edges) == 1
+    assert entity_edges[0]["data"]["source"] == "topic-auth"
+    assert entity_edges[0]["data"]["target"] == "entity:Bob"
