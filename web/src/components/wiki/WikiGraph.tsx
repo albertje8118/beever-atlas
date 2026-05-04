@@ -90,6 +90,39 @@ function colorForNode(node: WikiGraphNode): string {
   return KIND_META[kindKeyForNode(node)]?.color ?? KIND_META.wiki_default.color;
 }
 
+// Lighten a hex color by mixing it with white. Returned as `#rrggbb`.
+// Used to build the lighter top stop of each node's gradient fill so cards
+// read as "lit from above" rather than flat tiles.
+function lightenHex(hex: string, amount = 0.28): string {
+  const m = hex.replace("#", "");
+  if (m.length !== 6) return hex;
+  const r = parseInt(m.slice(0, 2), 16);
+  const g = parseInt(m.slice(2, 4), 16);
+  const b = parseInt(m.slice(4, 6), 16);
+  const lr = Math.round(r + (255 - r) * amount);
+  const lg = Math.round(g + (255 - g) * amount);
+  const lb = Math.round(b + (255 - b) * amount);
+  const toHex = (v: number) => v.toString(16).padStart(2, "0");
+  return `#${toHex(lr)}${toHex(lg)}${toHex(lb)}`;
+}
+
+function gradientStopsFor(color: string): string {
+  // Cytoscape consumes a space-separated string of two color stops.
+  // Lighten by 55% for a clearly visible top → bottom shift.
+  return `${lightenHex(color, 0.55)} ${color}`;
+}
+
+// Hex → "r, g, b" string for use in rgba() shadow colors. Lets each
+// node glow in its own kind color rather than a flat black.
+function hexToRgbCsv(hex: string): string {
+  const m = hex.replace("#", "");
+  if (m.length !== 6) return "100, 100, 100";
+  const r = parseInt(m.slice(0, 2), 16);
+  const g = parseInt(m.slice(2, 4), 16);
+  const b = parseInt(m.slice(4, 6), 16);
+  return `${r}, ${g}, ${b}`;
+}
+
 // ─── Filter logic ─────────────────────────────────────────────────────────────
 
 function applyFilters(
@@ -212,6 +245,8 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
         ...node.data,
         displayLabel: buildLabel(node),
         color,
+        gradientStops: gradientStopsFor(color),
+        glowColor: `rgb(${hexToRgbCsv(color)})`,
         kindKey,
         clusterKey,
         // Dimensions: bigger cards so titles are readable.
@@ -489,6 +524,10 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
             // User-preferred design after testing chip-with-title and
             // round-disc layouts. Kind-color body, white doc icon
             // centered in the square, title rendered as caption below.
+            //
+            // Visual depth: a top-to-bottom linear gradient (lighter →
+            // base color) gives each card a subtle 3D feel. Drop shadow
+            // is on by default; hover elevates it further.
             {
               selector: "node",
               style: {
@@ -496,7 +535,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                 label: "data(displayLabel)",
                 "text-valign": "bottom",
                 "text-halign": "center",
-                "text-margin-y": 8,
+                "text-margin-y": 9,
                 color: "#e2e8f0",
                 "font-size": "data(labelSize)",
                 "font-weight": "data(labelWeight)",
@@ -504,22 +543,33 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                 "text-max-width": "120px",
                 "text-outline-color": "#0f172a",
                 "text-outline-width": 1.5,
+                "background-fill": "linear-gradient" as unknown as "solid",
+                "background-gradient-direction": "to-bottom-right" as unknown as "to-bottom",
+                "background-gradient-stop-colors": "data(gradientStops)",
+                "background-gradient-stop-positions": "0 100",
                 "background-color": "data(color)",
-                "background-opacity": 0.92,
+                "background-opacity": 0.95,
                 "background-image": "data(icon)",
                 "background-fit": "contain",
-                "background-image-opacity": 0.95,
-                "background-width": "60%",
-                "background-height": "60%",
+                "background-image-opacity": 0.96,
+                "background-width": "58%",
+                "background-height": "58%",
                 "background-position-x": "50%",
                 "background-position-y": "50%",
                 width: "data(nodeWidth)" as unknown as number,
                 height: "data(nodeHeight)" as unknown as number,
                 "border-width": 1,
-                "border-color": "rgba(255,255,255,0.12)",
-                "corner-radius": 12,
-                "transition-property": "opacity, border-color, border-width",
-                "transition-duration": 150,
+                "border-color": "rgba(255,255,255,0.18)",
+                "corner-radius": 14,
+                "shadow-blur": 18,
+                "shadow-color": "data(glowColor)",
+                "shadow-opacity": 0.55,
+                "shadow-offset-x": 0,
+                "shadow-offset-y": 0,
+                "transition-property":
+                  "opacity, border-color, border-width, shadow-blur, shadow-opacity, width, height",
+                "transition-duration": 180,
+                "transition-timing-function": "ease-out-cubic",
               } as unknown as cytoscape.Css.Node,
             },
             // ── Wiki page cards ───────────────────────────────────────────
@@ -527,50 +577,68 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               selector: "node[kind = 'wiki']",
               style: {
                 "border-width": 1,
-                "border-color": "rgba(255,255,255,0.12)",
+                "border-color": "rgba(255,255,255,0.18)",
               },
             },
             // ── Channel hub ───────────────────────────────────────────────
+            // Radial-gradient gives the hub a "glowing center" look so it
+            // reads as the gravity well of the workspace.
             {
               selector: "node[kind = 'channel']",
               style: {
-                // Hub is a solid purple disc — no ribbon, full color fill.
-                "background-fill": "solid" as unknown as "solid",
+                "background-fill": "radial-gradient" as unknown as "solid",
+                "background-gradient-stop-colors": "#c084fc #7c3aed #5b21b6",
+                "background-gradient-stop-positions": "0 60 100",
                 "background-color": "#7c3aed",
                 "background-image": HUB_ICON_URL,
-                "background-width": "55%",
-                "background-height": "55%",
+                "background-width": "52%",
+                "background-height": "52%",
                 "background-position-x": "50%",
                 "border-width": 3,
-                "border-color": "rgba(168,85,247,0.7)",
+                "border-color": "rgba(192,132,252,0.85)",
                 "background-opacity": 1,
                 color: "#faf5ff",
                 "font-weight": 700,
                 "font-size": 13,
-                "corner-radius": 12,
+                "corner-radius": 14,
+                "shadow-blur": 28,
+                "shadow-color": "#a855f7",
+                "shadow-opacity": 0.55,
+                "shadow-offset-x": 0,
+                "shadow-offset-y": 0,
               },
             },
             // ── Entity nodes ──────────────────────────────────────────────
             {
               selector: "node[kind = 'entity']",
               style: {
-                "background-fill": "solid" as unknown as "solid",
+                "background-fill": "radial-gradient" as unknown as "solid",
+                "background-gradient-stop-colors": "data(gradientStops)",
+                "background-gradient-stop-positions": "0 100",
                 "background-color": "data(color)",
                 "background-image": "none",
-                "border-width": 1,
-                "border-color": "rgba(255,255,255,0.18)",
+                "border-width": 1.5,
+                "border-color": "rgba(255,255,255,0.28)",
+                "shadow-blur": 8,
+                "shadow-opacity": 0.4,
               },
             },
             // ── Interaction states ────────────────────────────────────────
             {
               selector: "node.dimmed",
-              style: { opacity: 0.2 },
+              style: {
+                opacity: 0.18,
+                "shadow-opacity": 0,
+              },
             },
             {
               selector: "node.highlighted, node.search-match",
               style: {
                 "border-width": 2.5,
                 "border-color": "#fbbf24",
+                "shadow-blur": 22,
+                "shadow-color": "#f59e0b",
+                "shadow-opacity": 0.7,
                 "z-index": 999,
                 opacity: 1,
               },
@@ -580,6 +648,9 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               style: {
                 "border-width": 2,
                 "border-color": "#facc15",
+                "shadow-blur": 16,
+                "shadow-color": "#facc15",
+                "shadow-opacity": 0.5,
                 opacity: 1,
               },
             },
@@ -588,6 +659,9 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               style: {
                 "border-color": "#fbbf24",
                 "border-width": 2.5,
+                "overlay-color": "#fbbf24",
+                "overlay-opacity": 0.18,
+                "overlay-padding": 8,
               },
             },
             {
@@ -601,22 +675,26 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               selector: "edge",
               style: {
                 width: 1.5,
-                "line-color": "rgba(148,163,184,0.35)",
+                "line-color": "rgba(148,163,184,0.32)",
                 "target-arrow-color": "rgba(148,163,184,0.45)",
                 "target-arrow-shape": "triangle",
                 "curve-style": "bezier",
                 "arrow-scale": 0.75,
-                "transition-property": "line-color, opacity, width",
-                "transition-duration": 150,
+                opacity: 0.9,
+                "transition-property": "line-color, opacity, width, target-arrow-color",
+                "transition-duration": 180,
+                "transition-timing-function": "ease-out-cubic",
               },
             },
-            { selector: "edge.dimmed", style: { opacity: 0.08 } },
+            { selector: "edge.dimmed", style: { opacity: 0.06, width: 1 } },
             {
               selector: "edge.highlighted",
               style: {
-                width: 2.5,
+                width: 2.8,
                 "line-color": "#facc15",
-                "target-arrow-color": "#facc15",
+                "target-arrow-color": "#fbbf24",
+                "line-style": "solid",
+                opacity: 1,
                 "z-index": 999,
               },
             },
@@ -838,8 +916,17 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           const baseH = (node.data().nodeHeight as number) ?? 0;
           if (baseW > 0 && baseH > 0) {
             node.stop(true, false).animate(
-              { style: { width: baseW * 1.1, height: baseH * 1.1 } },
-              { duration: 180, easing: "ease-out-cubic" },
+              {
+                style: {
+                  width: baseW * 1.18,
+                  height: baseH * 1.18,
+                  "shadow-blur": 32,
+                  "shadow-opacity": 0.95,
+                  "border-color": "rgba(255,255,255,0.6)",
+                  "border-width": 2,
+                },
+              },
+              { duration: 200, easing: "ease-out-cubic" },
             );
           }
         });
@@ -855,20 +942,36 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           const baseH = (node.data().nodeHeight as number) ?? 0;
           if (baseW > 0 && baseH > 0) {
             node.stop(true, false).animate(
-              { style: { width: baseW, height: baseH } },
-              { duration: 130, easing: "ease-in-cubic" },
+              {
+                style: {
+                  width: baseW,
+                  height: baseH,
+                  "shadow-blur": 18,
+                  "shadow-opacity": 0.55,
+                  "border-color": "rgba(255,255,255,0.18)",
+                  "border-width": 1,
+                },
+              },
+              { duration: 160, easing: "ease-in-cubic" },
             );
           }
         });
 
-        // Hub pulse — subtle breathing animation on the channel hub so
-        // the eye knows where the workspace root is even when zoomed
-        // out. Toggles +6% scale on a 1800 ms loop. Stops cleanly when
-        // cytoscape is destroyed because the closure captures ``alive``.
+        // Hub pulse — breathing animation on the channel hub so the eye
+        // knows where the workspace root is even when zoomed out.
+        // The pulse animates BOTH scale (~10%) AND the shadow glow
+        // (blur 22→38, opacity 0.45→0.85) on a 2000 ms loop, giving the
+        // hub a "beating heart" feel that the previous flat 6% scale
+        // didn't convey. Stops cleanly when cytoscape is destroyed
+        // because the closure captures ``alive``.
         const hubPulse = () => {
           if (!alive || !cy) return;
           const hub = (cy as unknown as {
-            $: (s: string) => { length: number; data: () => Record<string, unknown>; animate: (s: unknown, o: unknown) => void };
+            $: (s: string) => {
+              length: number;
+              data: () => Record<string, unknown>;
+              animate: (s: unknown, o: unknown) => void;
+            };
           }).$("node[kind = 'channel']");
           if (hub.length === 0) {
             window.setTimeout(hubPulse, 1800);
@@ -878,20 +981,34 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           const baseH = (hub.data().nodeHeight as number) ?? 0;
           if (baseW <= 0 || baseH <= 0) return;
           hub.animate(
-            { style: { width: baseW * 1.06, height: baseH * 1.06 } },
             {
-              duration: 900,
+              style: {
+                width: baseW * 1.08,
+                height: baseH * 1.08,
+                "shadow-blur": 38,
+                "shadow-opacity": 0.85,
+              },
+            },
+            {
+              duration: 1000,
               easing: "ease-in-out-cubic",
               complete: () => {
                 if (!alive || !cy) return;
                 hub.animate(
-                  { style: { width: baseW, height: baseH } },
                   {
-                    duration: 900,
+                    style: {
+                      width: baseW,
+                      height: baseH,
+                      "shadow-blur": 22,
+                      "shadow-opacity": 0.45,
+                    },
+                  },
+                  {
+                    duration: 1000,
                     easing: "ease-in-out-cubic",
                     complete: () => {
                       if (!alive) return;
-                      window.setTimeout(hubPulse, 600);
+                      window.setTimeout(hubPulse, 500);
                     },
                   },
                 );
@@ -902,6 +1019,34 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
         // Kick off the pulse after the layout settles so it doesn't
         // fight the initial fcose animation.
         window.setTimeout(hubPulse, 1200);
+
+        // Animated dash-flow on cross-reference edges. cytoscape doesn't
+        // animate line-dash-offset via its tween API, so we run a tiny
+        // RAF loop that nudges the offset every frame. Cheap (60 fps,
+        // single style write per tick) and produces the "marching ants"
+        // effect that signals "these are wikilinks, not hierarchy".
+        let dashOffset = 0;
+        let rafId = 0;
+        const dashTick = () => {
+          if (!alive || !cy) return;
+          dashOffset = (dashOffset + 0.6) % 16;
+          try {
+            const refs = (cy as unknown as {
+              edges: (sel: string) => {
+                length: number;
+                style: (k: string, v: unknown) => void;
+              };
+            }).edges("edge[kind = 'references_wiki']");
+            if (refs.length > 0) {
+              refs.style("line-dash-offset", -dashOffset);
+              refs.style("line-dash-pattern", [6, 4]);
+            }
+          } catch { /* best-effort */ }
+          rafId = window.requestAnimationFrame(dashTick);
+        };
+        rafId = window.requestAnimationFrame(dashTick);
+        // Capture for cleanup so the RAF stops with the component.
+        (cyRef as unknown as { _rafId?: number })._rafId = rafId;
 
         cyRef.current = cy;
         setCytoscapeReady(true);
@@ -914,6 +1059,11 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
 
     return () => {
       alive = false;
+      const heldRaf = (cyRef as unknown as { _rafId?: number })._rafId;
+      if (heldRaf) {
+        try { window.cancelAnimationFrame(heldRaf); } catch { /* no-op */ }
+        (cyRef as unknown as { _rafId?: number })._rafId = undefined;
+      }
       try { if (cy) cy.destroy(); } catch { /* destroy is best-effort */ }
       cyRef.current = null;
     };
@@ -957,8 +1107,30 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
       {/* No top filter strip — filters live in the floating left panel. */}
 
       <div className="relative flex flex-1 min-h-0 overflow-hidden">
-        {/* Canvas */}
-        <div className="relative flex-1 min-w-0 overflow-hidden bg-slate-950/60">
+        {/* Canvas — slate base + a fixed dot grid backdrop and a soft
+            radial vignette so the graph has visible depth even when
+            scrolled around. The patterns are pure CSS, sit BEHIND the
+            cytoscape canvas (which renders into a sibling div), and
+            don't intercept any pointer events. */}
+        <div className="relative flex-1 min-w-0 overflow-hidden bg-slate-950">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0"
+            style={{
+              backgroundImage:
+                "radial-gradient(ellipse 60% 50% at 50% 50%, rgba(168,85,247,0.18), transparent 70%), radial-gradient(rgba(148,163,184,0.32) 1.2px, transparent 1.2px)",
+              backgroundSize: "100% 100%, 26px 26px",
+              backgroundPosition: "center, 0 0",
+            }}
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0"
+            style={{
+              backgroundImage:
+                "linear-gradient(to bottom, rgba(2,6,23,0.6), rgba(2,6,23,0) 18%, rgba(2,6,23,0) 82%, rgba(2,6,23,0.6))",
+            }}
+          />
           {error && (
             <div
               className="absolute inset-0 flex items-center justify-center text-sm text-red-500"
@@ -990,6 +1162,256 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
             data-node-count={filtered?.nodes.length ?? 0}
             data-edge-count={filtered?.edges.length ?? 0}
           />
+
+          {/* ── Floating filter panel (left, canvas-scoped) ───────────────── */}
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 z-20">
+            {!filtersOpen ? (
+              // Collapsed pill
+              <button
+                type="button"
+                onClick={() => setFiltersOpen(true)}
+                className={cn(
+                  "flex flex-col items-center gap-1.5 rounded-xl border border-border/60",
+                  "bg-card/85 backdrop-blur-sm px-2 py-3 shadow-sm",
+                  "text-muted-foreground hover:text-foreground hover:bg-card transition-colors",
+                )}
+                aria-label="Open graph filters"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span
+                  className="text-[9px] font-medium tracking-wider uppercase text-muted-foreground/70"
+                  style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+                >
+                  Filters
+                </span>
+                {(filters.kind !== "all" || searchQuery) && (
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground leading-none">
+                    !
+                  </span>
+                )}
+              </button>
+            ) : (
+              // Expanded panel
+              <div
+                className={cn(
+                  "flex flex-col gap-2.5 rounded-xl border border-border/60",
+                  "bg-card/95 backdrop-blur-sm shadow-lg p-3 w-[172px]",
+                )}
+              >
+                {/* Header row */}
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                    <SlidersHorizontal className="w-3 h-3" />
+                    Filters
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFiltersOpen(false)}
+                    className="text-muted-foreground/50 hover:text-foreground transition-colors"
+                    aria-label="Close filters"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Search box */}
+                <div className="relative">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground/50 pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Search pages…"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className={cn(
+                      "w-full rounded-lg border border-border/50 bg-background/60 pl-6 pr-2 py-1",
+                      "text-[11px] text-foreground placeholder:text-muted-foreground/50",
+                      "focus:outline-none focus:border-border focus:bg-background",
+                      "transition-colors",
+                    )}
+                    aria-label="Search wiki pages"
+                  />
+                </div>
+
+                <div className="border-t border-border/30" />
+
+                {/* Kind filter */}
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
+                    Kind
+                  </span>
+                  <select
+                    aria-label="Filter by page kind"
+                    value={filters.kind}
+                    onChange={(e) => {
+                      setFilters((s) => ({ ...s, kind: e.target.value as KindFilter }));
+                    }}
+                    className="sr-only"
+                    data-testid="wiki-graph-filter-kind"
+                  >
+                    <option value="all">All kinds</option>
+                    <option value="topic">Topic</option>
+                    <option value="entity">Entity</option>
+                    <option value="decisions">Decisions</option>
+                    <option value="faq">FAQ</option>
+                    <option value="action_items">Action items</option>
+                  </select>
+                  {(["all", "topic", "entity", "decisions", "faq", "action_items"] as KindFilter[])
+                    .filter((k) => k === "all" || availableKinds.includes(k))
+                    .map((k) => {
+                      const active = filters.kind === k;
+                      const kindColorMap: Record<string, string> = {
+                        all: "#94a3b8",
+                        topic: KIND_META.wiki_topic.color,
+                        entity: KIND_META.entity.color,
+                        decisions: KIND_META.wiki_decisions.color,
+                        faq: KIND_META.wiki_faq.color,
+                        action_items: KIND_META.wiki_action_items.color,
+                      };
+                      const kindLabelMap: Record<string, string> = {
+                        all: "All kinds",
+                        topic: "Topics",
+                        entity: "Entities",
+                        decisions: "Decisions",
+                        faq: "FAQ",
+                        action_items: "Actions",
+                      };
+                      return (
+                        <button
+                          key={k}
+                          type="button"
+                          onClick={() => setFilters((s) => ({ ...s, kind: k }))}
+                          className={cn(
+                            "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
+                            active
+                              ? "border-border/70 text-foreground bg-muted"
+                              : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
+                          )}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full shrink-0 transition-colors"
+                            style={{ backgroundColor: active ? kindColorMap[k] : undefined }}
+                          />
+                          {kindLabelMap[k]}
+                        </button>
+                      );
+                    })}
+                </div>
+
+                <div className="border-t border-border/30" />
+
+                {/* Time window */}
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
+                    Updated
+                  </span>
+                  {(["all", "1h", "24h", "7d"] as WindowFilter[]).map((w) => {
+                    const active = filters.touchedWithin === w;
+                    const labelMap = { all: "Any time", "1h": "Last hour", "24h": "Last 24h", "7d": "Last 7d" };
+                    return (
+                      <button
+                        key={w}
+                        type="button"
+                        onClick={() => setFilters((s) => ({ ...s, touchedWithin: w }))}
+                        className={cn(
+                          "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
+                          active
+                            ? "border-border/70 text-foreground bg-muted"
+                            : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "w-1.5 h-1.5 rounded-full shrink-0 transition-colors",
+                            active ? "bg-muted-foreground" : "bg-transparent",
+                          )}
+                        />
+                        {labelMap[w]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="border-t border-border/30" />
+
+                {/* Citation density */}
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                    Min citations: {filters.minCitations}
+                  </span>
+                  <input
+                    aria-label="Minimum citation density"
+                    type="range"
+                    min={0}
+                    max={10}
+                    step={1}
+                    value={filters.minCitations}
+                    onChange={(e) =>
+                      setFilters((s) => ({
+                        ...s,
+                        minCitations: parseInt(e.target.value, 10),
+                      }))
+                    }
+                    className="w-full accent-primary h-1 rounded-full"
+                  />
+                </div>
+
+                <div className="border-t border-border/30" />
+
+                {/* Layout switcher */}
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
+                    Layout
+                  </span>
+                  {(["fcose", "dagre", "cose", "grid"] as LayoutKey[]).map((l) => {
+                    const active = layout === l;
+                    const labelMap: Record<LayoutKey, string> = {
+                      fcose: "Clusters",
+                      dagre: "Top-down",
+                      cose: "Force",
+                      grid: "Grid",
+                    };
+                    return (
+                      <button
+                        key={l}
+                        type="button"
+                        onClick={() => setLayout(l)}
+                        className={cn(
+                          "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
+                          active
+                            ? "border-border/70 text-foreground bg-muted"
+                            : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "w-1.5 h-1.5 rounded-full shrink-0",
+                            active ? "bg-primary" : "bg-transparent",
+                          )}
+                        />
+                        {labelMap[l]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="border-t border-border/30" />
+
+                {/* Refresh */}
+                <button
+                  type="button"
+                  onClick={() => refetch()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border/50 bg-background/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                >
+                  Refresh graph
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* ── Legend (bottom-right, canvas-scoped) ─────────────────────── */}
+          <div className="absolute bottom-8 right-4 z-10">
+            <Legend />
+          </div>
         </div>
 
         {/* Detail panel */}
@@ -1001,258 +1423,6 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           />
         )}
 
-        {/* ── Floating filter panel (left) ──────────────────────────── */}
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-20">
-          {!filtersOpen ? (
-            // Collapsed pill
-            <button
-              type="button"
-              onClick={() => setFiltersOpen(true)}
-              className={cn(
-                "flex flex-col items-center gap-1.5 rounded-xl border border-border/60",
-                "bg-card/85 backdrop-blur-sm px-2 py-3 shadow-sm",
-                "text-muted-foreground hover:text-foreground hover:bg-card transition-colors",
-              )}
-              aria-label="Open graph filters"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span
-                className="text-[9px] font-medium tracking-wider uppercase text-muted-foreground/70"
-                style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
-              >
-                Filters
-              </span>
-              {(filters.kind !== "all" || searchQuery) && (
-                <span className="flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground leading-none">
-                  !
-                </span>
-              )}
-            </button>
-          ) : (
-            // Expanded panel
-            <div
-              className={cn(
-                "flex flex-col gap-2.5 rounded-xl border border-border/60",
-                "bg-card/95 backdrop-blur-sm shadow-lg p-3 w-[172px]",
-              )}
-            >
-              {/* Header row */}
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-                  <SlidersHorizontal className="w-3 h-3" />
-                  Filters
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setFiltersOpen(false)}
-                  className="text-muted-foreground/50 hover:text-foreground transition-colors"
-                  aria-label="Close filters"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Search box */}
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground/50 pointer-events-none" />
-                <input
-                  type="text"
-                  placeholder="Search pages…"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className={cn(
-                    "w-full rounded-lg border border-border/50 bg-background/60 pl-6 pr-2 py-1",
-                    "text-[11px] text-foreground placeholder:text-muted-foreground/50",
-                    "focus:outline-none focus:border-border focus:bg-background",
-                    "transition-colors",
-                  )}
-                  aria-label="Search wiki pages"
-                />
-              </div>
-
-              <div className="border-t border-border/30" />
-
-              {/* Kind filter */}
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
-                  Kind
-                </span>
-                {/* Hidden select preserves the data-testid contract for tests */}
-                <select
-                  aria-label="Filter by page kind"
-                  value={filters.kind}
-                  onChange={(e) => {
-                    setFilters((s) => ({ ...s, kind: e.target.value as KindFilter }));
-                  }}
-                  className="sr-only"
-                  data-testid="wiki-graph-filter-kind"
-                >
-                  <option value="all">All kinds</option>
-                  <option value="topic">Topic</option>
-                  <option value="entity">Entity</option>
-                  <option value="decisions">Decisions</option>
-                  <option value="faq">FAQ</option>
-                  <option value="action_items">Action items</option>
-                </select>
-                {/* Visual kind buttons */}
-                {(["all", "topic", "entity", "decisions", "faq", "action_items"] as KindFilter[])
-                  .filter((k) => k === "all" || availableKinds.includes(k))
-                  .map((k) => {
-                    const active = filters.kind === k;
-                    const kindColorMap: Record<string, string> = {
-                      all: "#94a3b8",
-                      topic: KIND_META.wiki_topic.color,
-                      entity: KIND_META.entity.color,
-                      decisions: KIND_META.wiki_decisions.color,
-                      faq: KIND_META.wiki_faq.color,
-                      action_items: KIND_META.wiki_action_items.color,
-                    };
-                    const kindLabelMap: Record<string, string> = {
-                      all: "All kinds",
-                      topic: "Topics",
-                      entity: "Entities",
-                      decisions: "Decisions",
-                      faq: "FAQ",
-                      action_items: "Actions",
-                    };
-                    return (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() => setFilters((s) => ({ ...s, kind: k }))}
-                        className={cn(
-                          "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
-                          active
-                            ? "border-border/70 text-foreground bg-muted"
-                            : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
-                        )}
-                      >
-                        <span
-                          className="w-1.5 h-1.5 rounded-full shrink-0 transition-colors"
-                          style={{ backgroundColor: active ? kindColorMap[k] : undefined }}
-                        />
-                        {kindLabelMap[k]}
-                      </button>
-                    );
-                  })}
-              </div>
-
-              <div className="border-t border-border/30" />
-
-              {/* Time window */}
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
-                  Updated
-                </span>
-                {(["all", "1h", "24h", "7d"] as WindowFilter[]).map((w) => {
-                  const active = filters.touchedWithin === w;
-                  const labelMap = { all: "Any time", "1h": "Last hour", "24h": "Last 24h", "7d": "Last 7d" };
-                  return (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => setFilters((s) => ({ ...s, touchedWithin: w }))}
-                      className={cn(
-                        "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
-                        active
-                          ? "border-border/70 text-foreground bg-muted"
-                          : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "w-1.5 h-1.5 rounded-full shrink-0 transition-colors",
-                          active ? "bg-muted-foreground" : "bg-transparent",
-                        )}
-                      />
-                      {labelMap[w]}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="border-t border-border/30" />
-
-              {/* Citation density */}
-              <div className="flex flex-col gap-1.5">
-                <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-                  Min citations: {filters.minCitations}
-                </span>
-                <input
-                  aria-label="Minimum citation density"
-                  type="range"
-                  min={0}
-                  max={10}
-                  step={1}
-                  value={filters.minCitations}
-                  onChange={(e) =>
-                    setFilters((s) => ({
-                      ...s,
-                      minCitations: parseInt(e.target.value, 10),
-                    }))
-                  }
-                  className="w-full accent-primary h-1 rounded-full"
-                />
-              </div>
-
-              <div className="border-t border-border/30" />
-
-              {/* Layout switcher */}
-              <div className="flex flex-col gap-1">
-                <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/50 mb-0.5">
-                  Layout
-                </span>
-                {(["fcose", "dagre", "cose", "grid"] as LayoutKey[]).map((l) => {
-                  const active = layout === l;
-                  const labelMap: Record<LayoutKey, string> = {
-                    fcose: "Clusters",
-                    dagre: "Top-down",
-                    cose: "Force",
-                    grid: "Grid",
-                  };
-                  return (
-                    <button
-                      key={l}
-                      type="button"
-                      onClick={() => setLayout(l)}
-                      className={cn(
-                        "inline-flex items-center gap-2 px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors w-full text-left",
-                        active
-                          ? "border-border/70 text-foreground bg-muted"
-                          : "border-border/40 text-muted-foreground/60 bg-transparent hover:border-border hover:text-foreground",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "w-1.5 h-1.5 rounded-full shrink-0",
-                          active ? "bg-primary" : "bg-transparent",
-                        )}
-                      />
-                      {labelMap[l]}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="border-t border-border/30" />
-
-              {/* Refresh */}
-              <button
-                type="button"
-                onClick={() => refetch()}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border/50 bg-background/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              >
-                Refresh graph
-              </button>
-            </div>
-          )}
-        </div>
-        {/* ── End floating filter panel ─────────────────────────────── */}
-
-        {/* ── Legend (bottom-right overlay) ────────────────────────── */}
-        <div className="absolute bottom-8 right-4 z-10">
-          <Legend />
-        </div>
       </div>
 
       {/* Footer */}
@@ -1409,14 +1579,14 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
         data-testid="wiki-graph-panel-resize"
       />
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-card/95 px-4 py-3 backdrop-blur-sm">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {selection.isChannel
-            ? "Channel hub"
-            : selection.isEntity
-              ? "Entity"
-              : "Wiki page"}
-        </span>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {selection.isChannel
+              ? "Channel hub"
+              : selection.isEntity
+                ? "Entity"
+                : "Wiki page"}
+          </span>
           {!selection.isChannel && !selection.isEntity && selection.pageId && (
             <button
               type="button"
@@ -1429,6 +1599,8 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
               Open in Wiki
             </button>
           )}
+        </div>
+        <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={onClose}
