@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 interface WikiLinkProps {
   /** Bracketed title the LLM emitted, e.g. "Authentication". */
@@ -11,7 +11,10 @@ interface WikiLinkProps {
 /**
  * Renders an inline `[[Page Title]]` reference.
  *
- * Resolved → an anchor that navigates to the channel-scoped wiki page.
+ * Resolved → a React Router `<Link>` that navigates to the channel-
+ * scoped wiki page WITHOUT a full-page reload. Using `<a href>` here
+ * would cause a top-level navigation that drops the SPA's auth
+ * context + scroll position; `<Link>` keeps the routing client-side.
  * Unresolved → a "broken-link" badge (red dashed underline + tooltip)
  * that opens a placeholder modal explaining the page does not yet
  * exist. The modal is V1 — a future change will wire actual
@@ -23,14 +26,14 @@ export function WikiLink({ title, slug }: WikiLinkProps) {
 
   if (slug && channelId) {
     return (
-      <a
+      <Link
         className="wiki-link text-primary hover:underline"
-        href={`/channels/${channelId}/wiki/pages/${slug}`}
+        to={`/channels/${channelId}/wiki/pages/${slug}`}
         data-testid="wiki-link"
         data-slug={slug}
       >
         {title}
-      </a>
+      </Link>
     );
   }
 

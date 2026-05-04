@@ -29,28 +29,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import re
 import sys
 from datetime import UTC, datetime
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from beever_atlas.wiki.slugify import slugify as _slugify_shared
+
 logger = logging.getLogger(__name__)
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
 def _slugify(title: str, page_id: str) -> str:
-    """Convert ``title`` (or ``page_id`` fallback) into a kebab-case slug."""
-    raw = (title or "").strip().lower()
-    if not raw:
-        raw = (page_id or "").replace(":", "-").lower()
-    cleaned = _SLUG_RE.sub("-", raw).strip("-")
-    while "--" in cleaned:
-        cleaned = cleaned.replace("--", "-")
-    return cleaned or "untitled"
+    """Thin wrapper over ``beever_atlas.wiki.slugify.slugify``.
+
+    The shared utility owns the canonical derivation so the offline
+    migration and the curation HTTP API never produce different slugs
+    for the same title (code-review finding §M).
+    """
+    return _slugify_shared(title, fallback_page_id=page_id)
 
 
 def _derive_kind(page_id: str) -> str:

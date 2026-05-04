@@ -415,22 +415,16 @@ class _MergeBody(BaseModel):
 
 
 def _slugify_title(title: str) -> str:
-    """Match the maintainer's slug derivation — ascii-only kebab-case.
+    """Thin wrapper over the shared ``beever_atlas.wiki.slugify.slugify``.
 
-    Aligned with ``WikiMaintainer.apply_update``'s
-    ``page_id.replace(":", "-")`` fallback so split-created pages get
-    stable slugs that don't collide with topic / entity prefixes.
+    Kept as a private helper so call sites in this module read locally;
+    the shared utility owns the canonical derivation so the curation
+    API and the offline migration script never diverge (HIGH-priority
+    code-review finding §M).
     """
-    out: list[str] = []
-    for ch in title.strip().lower():
-        if ch.isalnum():
-            out.append(ch)
-        elif ch in (" ", "-", "_", "/"):
-            out.append("-")
-    cleaned = "".join(out).strip("-")
-    while "--" in cleaned:
-        cleaned = cleaned.replace("--", "-")
-    return cleaned or "untitled"
+    from beever_atlas.wiki.slugify import slugify
+
+    return slugify(title)
 
 
 async def _load_page_store():
@@ -571,15 +565,17 @@ async def split_wiki_page(
     await store.save_page(new_page)
     if moved:
         await store.remove_facts_from_page(channel_id, slug, moved, target_lang=lang)
+    # The new page is always created by ``save_page`` above (even if zero
+    # facts were moved — the operator may want to seed the title now and
+    # move facts later), so the response always carries it. Drop the
+    # ``model_dump`` to None branch — it was a leftover ternary that
+    # was never actually reachable since ``moved`` is a list, not None.
+    persisted = await store.get_page_by_slug(channel_id, new_slug, target_lang=lang)
     return {
         "source_slug": slug,
         "new_slug": new_slug,
         "moved_fact_count": len(moved),
-        "new_page": (
-            await store.get_page_by_slug(channel_id, new_slug, target_lang=lang)
-        ).model_dump(mode="json")
-        if moved is not None
-        else None,
+        "new_page": persisted.model_dump(mode="json") if persisted is not None else None,
     }
 
 

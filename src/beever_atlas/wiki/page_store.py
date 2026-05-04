@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 from beever_atlas.models.persistence import WikiPage, WikiPageSection, WikiTension
 
@@ -352,24 +353,10 @@ class WikiPageStore:
                     "updated_at": datetime.now(tz=UTC).isoformat(),
                 }
             },
-            return_document=True,
+            return_document=ReturnDocument.AFTER,
         )
         if result is None:
             return None
-        # PyMongo returns the post-update doc; some fakes return the pre-update.
-        # The contract here is "post-update", which we get by either:
-        #   - return_document=True (motor); or
-        #   - re-querying. Re-query path:
-        if isinstance(result, dict) and result.get("pin_state") != pin_state:
-            doc = await self._collection.find_one(
-                {
-                    "channel_id": channel_id,
-                    "target_lang": target_lang,
-                    "slug": slug,
-                }
-            )
-            if doc is not None:
-                result = doc
         result.pop("_id", None)
         return WikiPage.model_validate(result)
 
@@ -408,20 +395,10 @@ class WikiPageStore:
                     "updated_at": datetime.now(tz=UTC).isoformat(),
                 }
             },
-            return_document=True,
+            return_document=ReturnDocument.AFTER,
         )
         if result is None:
             return None
-        if isinstance(result, dict) and result.get("merged_into") != target_slug:
-            doc = await self._collection.find_one(
-                {
-                    "channel_id": channel_id,
-                    "target_lang": target_lang,
-                    "slug": source_slug,
-                }
-            )
-            if doc is not None:
-                result = doc
         result.pop("_id", None)
         return WikiPage.model_validate(result)
 

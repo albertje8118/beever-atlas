@@ -336,9 +336,17 @@ def test_render_kind_prompt_omits_pinned_addendum_when_unpinned() -> None:
     assert "CURATION CONSTRAINTS" not in prompt
 
 
-def test_legacy_apply_update_prompt_also_honors_pinned_state() -> None:
-    """Pin/hide must work even when WIKI_LLM_NATIVE_REDESIGN=False —
-    the legacy prompt path renders the same addendum."""
+def test_legacy_apply_update_prompt_does_NOT_include_pinned_addendum() -> None:
+    """Flag-OFF byte-identical guarantee: ``_render_apply_update_prompt``
+    must produce exactly the same prompt as it did pre-redesign — even
+    when an operator has pinned the page via the curation API. The
+    addendum lives only on the kind-dispatch path so flipping
+    ``WIKI_LLM_NATIVE_REDESIGN`` ON/OFF is a clean toggle.
+
+    The pin still persists (``pin_state.pinned=True`` lands in Mongo
+    regardless), so flipping the redesign flag ON later picks up the
+    operator's intent immediately on the next apply_update.
+    """
     page = _make_page(
         pin_state={
             "pinned": True,
@@ -349,7 +357,8 @@ def test_legacy_apply_update_prompt_also_honors_pinned_state() -> None:
         },
     )
     prompt = wm_mod._render_apply_update_prompt(page, [], target_lang="en")
-    assert "CURATION CONSTRAINTS" in prompt
+    assert "CURATION CONSTRAINTS" not in prompt
+    assert "PINNED" not in prompt
 
 
 # ---------------------------------------------------------------------------

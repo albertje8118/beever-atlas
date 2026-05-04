@@ -252,6 +252,38 @@ def _patch_settings(monkeypatch: pytest.MonkeyPatch, *, redesign_on: bool) -> No
     monkeypatch.setattr("beever_atlas.infra.config.get_settings", lambda: fake)
 
 
+async def test_apply_merge_redirects_falls_back_to_slug_when_target_missing() -> None:
+    """Defensive: if an operator merged into a target that was later
+    deleted out-of-band, ``_apply_merge_redirects`` MUST NOT crash —
+    it falls back to using the target slug as the page_id key so the
+    next apply_update creates a fresh page rather than dropping the
+    fact route entirely."""
+    from unittest.mock import AsyncMock as _AM
+
+    page_store = AsyncMock()
+    # The source page exists with merged_into pointing at "topic-tgt",
+    # but list_pages returns ONLY the source — the target was deleted.
+    src = WikiPage(
+        channel_id="C1",
+        target_lang="en",
+        page_id="topic:src",
+        title="Source",
+        slug="topic-src",
+        sections=[WikiPageSection(id="overview", title="Overview", content_md="x")],
+        merged_into="topic-tgt",
+    )
+    page_store.list_pages = _AM(return_value=[src])
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    plan = {"topic:src": ["f1", "f2"]}
+    redirected = await maintainer._apply_merge_redirects(plan, channel_id="C1", target_lang="en")
+    # Source key was rewritten — the orphan target slug is used as the
+    # new page_id key. Future apply_update on this key will first-touch
+    # the page, which is the desired graceful-degradation behaviour.
+    assert "topic:src" not in redirected
+    assert redirected.get("topic-tgt") == ["f1", "f2"]
+
+
 async def test_apply_update_writes_neo4j_reference_edge_for_resolved_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

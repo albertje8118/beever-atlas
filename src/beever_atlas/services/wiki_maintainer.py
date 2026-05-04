@@ -531,15 +531,19 @@ def _render_apply_update_prompt(
             for f in new_facts
         ],
     }
-    body = (
+    # Legacy single-prompt path — flag-OFF byte-identical guarantee.
+    # The pinned-page addendum lives ONLY on the kind-dispatch path
+    # (``_render_kind_prompt``) so this prompt stays identical to its
+    # pre-redesign form. Operators who pin pages while the flag is OFF
+    # still see ``pin_state.pinned=True`` persisted (curation API runs
+    # regardless of the flag) — the addendum starts steering the LLM
+    # the moment ``WIKI_LLM_NATIVE_REDESIGN`` flips ON.
+    return (
         _APPLY_UPDATE_SYSTEM_PROMPT
         + "\n\n--- INPUT ---\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n\n--- OUTPUT (JSON only) ---\n"
     )
-    if _is_page_pinned(page):
-        body += _PINNED_PAGE_ADDENDUM
-    body += "\n\n--- OUTPUT (JSON only) ---\n"
-    return body
 
 
 def _parse_apply_update_response(raw: str) -> list["WikiPageSection"]:

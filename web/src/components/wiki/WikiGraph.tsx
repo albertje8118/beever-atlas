@@ -101,7 +101,13 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
     [data, filters],
   );
 
-  const handleNodeClick = useCallback(
+  // Click handler held in a ref so the cytoscape mount effect does NOT
+  // depend on the callback's identity — otherwise channelId / navigate
+  // identity changes would tear down + remount the entire graph (visible
+  // flicker). The ref keeps the latest closure available without
+  // making it part of the effect's dependency array.
+  const handleNodeClickRef = useRef<(nodeId: string) => void>(() => undefined);
+  handleNodeClickRef.current = useCallback(
     (nodeId: string) => {
       if (!channelId) return;
       if (nodeId.startsWith("entity:")) {
@@ -176,7 +182,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           destroy: () => void;
         };
         cyTyped.on("tap", "node", (e) => {
-          handleNodeClick(e.target.id());
+          handleNodeClickRef.current(e.target.id());
         });
         cyRef.current = cy;
         setCytoscapeReady(true);
@@ -196,7 +202,11 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
       }
       cyRef.current = null;
     };
-  }, [filtered, layout, handleNodeClick]);
+    // ``handleNodeClickRef`` is intentionally absent from this effect's
+    // deps — the ref's `.current` is updated above on every render so
+    // the tap handler always sees the latest closure without needing
+    // to remount cytoscape on channelId / navigate identity changes.
+  }, [filtered, layout]);
 
   return (
     <div className="flex h-full flex-col" data-testid="wiki-graph-root">
