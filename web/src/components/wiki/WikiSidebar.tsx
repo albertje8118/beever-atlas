@@ -85,7 +85,7 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
           <button
             onClick={onClick}
             aria-label={fullTitle}
-            className={`flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+            className={`group/row flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
               isActive
                 ? "bg-primary/10 text-primary border-l-2 border-primary font-medium"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -105,9 +105,15 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
               </span>
             )}
             <span className="truncate flex-1">{shownTitle}</span>
+            {/* Memory count — hidden by default, revealed on row hover.
+                The bare number wasn't self-explanatory and competed
+                with the section number for the operator's eye; on
+                hover we surface the full "N memories" so the unit
+                disambiguates itself. Tooltip carries it too for
+                pointer-less navigation. */}
             {node.memory_count > 0 && (
-              <span className="ml-auto text-[11px] text-muted-foreground/60 shrink-0 tabular-nums">
-                {node.memory_count}
+              <span className="ml-auto text-[11px] text-muted-foreground/70 shrink-0 tabular-nums opacity-0 group-hover/row:opacity-100 transition-opacity">
+                {node.memory_count} memories
               </span>
             )}
           </button>
@@ -115,6 +121,9 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
       />
       <TooltipContent side="right" className="text-xs max-w-xs">
         {fullTitle}
+        {node.memory_count > 0 && (
+          <span className="ml-1 text-muted-foreground/70">· {node.memory_count} memories</span>
+        )}
       </TooltipContent>
     </Tooltip>
   );
@@ -284,7 +293,7 @@ function PrefixGroup({ prefix, items, activePageId, onNavigate, indent }: Prefix
     <div>
       <button
         onClick={() => setUserExpanded((v) => !v)}
-        className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+        className="group/row flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
         style={{ paddingLeft: `${10 + indent * 14}px` }}
         aria-expanded={expanded}
       >
@@ -295,9 +304,10 @@ function PrefixGroup({ prefix, items, activePageId, onNavigate, indent }: Prefix
         )}
         <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         <span className="truncate flex-1 font-medium">{prefix}</span>
-        <span className="text-[11px] text-muted-foreground/60 shrink-0 tabular-nums">
-          {items.length}
-          {totalMemories > 0 && ` · ${totalMemories}`}
+        {/* Folder counts — same hover-only treatment as leaf rows. */}
+        <span className="text-[11px] text-muted-foreground/70 shrink-0 tabular-nums opacity-0 group-hover/row:opacity-100 transition-opacity">
+          {items.length} pages
+          {totalMemories > 0 && ` · ${totalMemories} memories`}
         </span>
       </button>
       {expanded && (
