@@ -194,12 +194,18 @@ function TopicItemWithChildren({
       {hasChildren && expanded && (
         <div>
           {node.children.map((child) => (
-            <SidebarItem
+            // Render recursively so nested folders (folder → folder
+            // → topic) get their own chevron + indented child list.
+            // The original code rendered children as a flat
+            // SidebarItem which worked for 2-level sub-topics but
+            // silently dropped grandchildren in the n-depth folder
+            // tree the structure planner produces.
+            <TopicItemWithChildren
               key={child.id}
               node={child}
-              isActive={activePageId === child.id}
-              onClick={() => onNavigate(child.id)}
-              indent={indent + 2}
+              activePageId={activePageId}
+              onNavigate={onNavigate}
+              indent={indent + 1}
             />
           ))}
         </div>
