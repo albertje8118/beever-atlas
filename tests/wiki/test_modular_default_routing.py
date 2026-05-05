@@ -261,3 +261,82 @@ async def test_thin_5_fact_cluster_also_routes_modular() -> None:
 
     by_id = {m["id"]: m for m in out.modules}
     assert by_id["key_facts"]["data"]["renderer_kind"] == "frontend"
+
+
+# ---------------------------------------------------------------------------
+# Round 4 — boundary + far-above-threshold coverage. Pre-fix the
+# compiler-level routing only invoked the modular path for clusters
+# strictly under TOPIC_SUBPAGE_THRESHOLD (15). Post-fix every fact
+# count routes through the modular path; these cases pin the
+# orchestrator's behaviour at the boundary (=15) and far above (25,
+# 50) so a future regression that re-introduces a size-based legacy
+# branch is caught immediately.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fact_count", [15, 25, 50])
+@pytest.mark.asyncio
+async def test_modular_path_runs_at_and_above_subpage_threshold(
+    fact_count: int,
+) -> None:
+    """fact_count = 15 (boundary), 25, 50 — all must produce a
+    frontend-renderer ``key_facts`` module. The boundary case is the
+    important one: pre-fix `>=15` got routed to legacy
+    ``TOPIC_PROMPT_V2``; post-fix it stays in the modular pipeline.
+    """
+    facts = _make_22_facts()
+    # Stretch / trim to the requested size by repeating the seed
+    # fixtures so the resulting list has the right count.
+    while len(facts) < fact_count:
+        facts.extend(_make_22_facts())
+    facts = facts[:fact_count]
+
+    async def stub_llm(prompt: str) -> str:
+        return json.dumps(
+            {
+                "plan": {
+                    "modules": [
+                        {"id": "hero_summary", "anchor": "s"},
+                        {"id": "key_facts", "anchor": "kf"},
+                        {"id": "provenance_drawer", "anchor": "src"},
+                    ]
+                },
+                "tldr": "**Boundary.**",
+                "overview": "Overview.",
+                "body": (
+                    "<<MODULE:hero_summary>>\n\n"
+                    "<<MODULE:key_facts>>\n\n"
+                    "<<MODULE:provenance_drawer>>"
+                ),
+            }
+        )
+
+    cluster_arg = {
+        "title": f"Cluster-{fact_count}",
+        "member_facts": facts,
+        "child_count": 0,
+    }
+    signals = compute_signals(cluster=cluster_arg)
+    render_inputs = {"facts": facts, "decisions": [], "open_questions": []}
+
+    out = await compile_topic_page_modular(
+        title=f"Cluster-{fact_count}",
+        summary="",
+        signals=signals,
+        render_inputs=render_inputs,
+        top_facts=facts[:8],
+        top_people=[],
+        llm=stub_llm,
+    )
+
+    assert isinstance(out, ModularPageOutput)
+    assert out.modules, (
+        f"fact_count={fact_count}: modular path produced empty modules "
+        "list — frontend would fall back to WikiMarkdown(page.content)"
+    )
+    by_id = {m["id"]: m for m in out.modules}
+    assert "key_facts" in by_id
+    assert by_id["key_facts"]["data"]["renderer_kind"] == "frontend", (
+        f"fact_count={fact_count}: key_facts must stay frontend renderer "
+        "regardless of cluster size"
+    )

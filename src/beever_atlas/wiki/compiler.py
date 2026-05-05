@@ -3336,6 +3336,7 @@ class WikiCompiler:
         cluster,
         gathered: dict,
         sorted_facts: list,
+        sub_pages: list[WikiPage] | None = None,
     ) -> "WikiPage | None":
         """Run the adaptive-modules compiler for one topic.
 
@@ -3348,6 +3349,13 @@ class WikiCompiler:
         inputs from the cluster + gathered data, wraps the compiler's
         LLM in the orchestrator's expected callable shape, and maps
         the resulting ``ModularPageOutput`` to a ``WikiPage``.
+
+        ``sub_pages`` (optional): when the caller has already split a
+        large cluster into sub-topic pages via ``_analyze_topic`` +
+        ``_compile_subtopic_page``, pass them here so the parent's
+        ``subpage_cards`` module fires. The orchestrator's
+        ``compute_signals`` reads ``child_count`` off the cluster dict
+        and the ``subpage_cards`` predicate gates on ``child_count >= 1``.
         """
         from beever_atlas.wiki.modules.orchestrator import (
             compile_topic_page_modular,
@@ -3457,6 +3465,20 @@ class WikiCompiler:
                     {"term": entry.strip(), "definition": "", "first_mentioned_by": ""}
                 )
 
+        # Children payload for the ``subpage_cards`` module. When the
+        # caller pre-split the cluster into sub-pages (≥15-fact path),
+        # these become the parent's child cards; otherwise the list is
+        # empty and the predicate (``child_count >= 1``) fails naturally.
+        children_payload: list[dict] = []
+        for sp in sub_pages or []:
+            children_payload.append(
+                {
+                    "title": sp.title or "",
+                    "slug": sp.slug or "",
+                    "summary": (sp.summary or "")[:160],
+                }
+            )
+
         render_inputs = {
             "facts": [
                 {**f, "memory_text": f["memory_text"]} for f in facts_data
@@ -3467,10 +3489,11 @@ class WikiCompiler:
             "open_questions": open_questions_data,
             "related_topics": related_topics_data,
             "glossary": glossary_data,
+            "children": children_payload,
             # Other keys (events, alternatives, criteria, pros, cons,
-            # quotes, process_steps, process_edges, children, media)
-            # are not yet populated — modules requiring them will
-            # render empty until the gather step is extended.
+            # quotes, process_steps, process_edges, media) are not yet
+            # populated — modules requiring them will render empty
+            # until the gather step is extended.
         }
 
         # Compute signals from the same data so the planner's
@@ -3479,7 +3502,7 @@ class WikiCompiler:
             cluster={
                 "title": cluster.title,
                 "member_facts": facts_data,
-                "child_count": 0,
+                "child_count": len(children_payload),
             },
             decisions=decisions_data,
             entities=entities_data,
@@ -3543,6 +3566,21 @@ class WikiCompiler:
         )
 
         slug = _slugify(cluster.title) or cluster.id
+        # When sub-pages were pre-split (≥15-fact path), attach them as
+        # WikiPageRef on the parent so the channel-tree builders can
+        # walk the parent → children relationship without rerouting
+        # through the legacy parent-page assembly.
+        children_refs: list[WikiPageRef] = []
+        for sp in sub_pages or []:
+            children_refs.append(
+                WikiPageRef(
+                    id=sp.id,
+                    title=sp.title,
+                    slug=sp.slug,
+                    section_number="",
+                    memory_count=sp.memory_count,
+                )
+            )
         return WikiPage(
             id=f"topic-{slug}",
             slug=slug,
@@ -3556,6 +3594,7 @@ class WikiCompiler:
                 out.content, _build_citations(sorted_facts[:20])
             ),
             modules=out.modules,
+            children=children_refs,
         )
 
     async def _compile_topic_page(self, cluster, gathered: dict) -> WikiPage | list[WikiPage]:
@@ -3583,65 +3622,24 @@ class WikiCompiler:
 
         v2 = get_settings().wiki_compiler_v2
         sorted_facts = sorted(member_facts, key=lambda f: f.quality_score, reverse=True)
-
-        # ── adaptive-wiki-page-content — modular path ────────────────
-        # Always try the new module-aware single-call compiler FIRST,
-        # regardless of cluster size. The planner adapts the module
-        # mix to the data density (3 modules for thin pages, 5-7 for
-        # rich pages). Routing through one prompt keeps user-facing
-        # output consistent across page sizes.
-        #
-        # Sub-page-split clusters (≥15 facts) still go through the
-        # legacy parent-page assembly below because their pipeline
-        # depends on ``_analyze_topic`` which the modular path doesn't
-        # express today. Loosening that is Round 2.
-        if member_facts and len(member_facts) < TOPIC_SUBPAGE_THRESHOLD:
-            try:
-                modular_page = await self._try_compile_topic_modular(
-                    cluster, gathered, sorted_facts
-                )
-                if modular_page is not None:
-                    return modular_page
-            except Exception as exc:  # noqa: BLE001 — never block the page on modular failure
-                logger.warning(
-                    "modular_topic_compile_failed_falling_back_to_legacy "
-                    "topic=%s exc_type=%s exc=%s",
-                    cluster.id, type(exc).__name__, exc,
-                )
-            # Modular returned None (catastrophic fallback). Fall back to
-            # the thin-topic legacy path for very small clusters so we
-            # don't render an awkward 5-row table for a 2-fact page.
-            if v2 and len(member_facts) < _THIN_TOPIC_THRESHOLD:
-                return await self._compile_thin_topic(cluster, gathered)
-        facts_data = [
-            {
-                "memory_text": wrap_untrusted(f.memory_text),
-                "author_name": f.author_name,
-                "quality_score": f.quality_score,
-                "fact_type": f.fact_type,
-                "importance": f.importance,
-                "message_ts": f.message_ts,
-                "thread_context_summary": f.thread_context_summary,
-            }
-            for f in sorted_facts[:30]
-        ]
-        media_data = _build_media_data(member_facts)
         slug = _slugify(cluster.title) or cluster.id
 
-        # Build related topics data for cross-references
-        all_clusters = gathered["clusters"]
-        related_topics = []
-        for rid in getattr(cluster, "related_cluster_ids", []):
-            for rc in all_clusters:
-                if rc.id == rid:
-                    related_topics.append(
-                        {"id": f"topic-{_slugify(rc.title) or rc.id}", "title": rc.title}
-                    )
-                    break
-        related_topics_json = json.dumps(related_topics, default=str)
-
-        # Sub-page analysis for large clusters
-        if len(member_facts) >= TOPIC_SUBPAGE_THRESHOLD:
+        # ── adaptive-wiki-page-content — modular path ────────────────
+        # The module-aware single-call compiler is the DEFAULT for ALL
+        # topic pages (small + mid + large) so the v2 cards render on
+        # every topic regardless of size. The planner adapts the
+        # module mix to the data density (3 modules for thin pages,
+        # 5-7 for rich pages).
+        #
+        # ≥15-fact clusters first run ``_analyze_topic`` to (optionally)
+        # split into sub-topic sub-pages. The sub-pages are produced
+        # via the legacy ``_compile_subtopic_page`` flow (untouched —
+        # sub-page rendering is its own pipeline). The PARENT page
+        # rendering then routes through the modular path with the
+        # sub-pages passed as ``children`` so the ``subpage_cards``
+        # module fires on the parent's plan.
+        sub_pages_for_parent: list[WikiPage] = []
+        if member_facts and len(member_facts) >= TOPIC_SUBPAGE_THRESHOLD:
             analysis = await self._analyze_topic(cluster, sorted_facts)
             # Force a retry when the LLM says "no split" on a very large cluster
             # (≥40 facts). A 40+ row Key Facts table is unreadable, so treat
@@ -3660,94 +3658,173 @@ class WikiCompiler:
                 analysis = await self._analyze_topic(cluster, sorted_facts)
             if analysis and analysis.get("needs_subpages") and analysis.get("subpages"):
                 try:
-                    # Generate sub-pages in parallel
+                    # Generate sub-pages in parallel — same as the legacy
+                    # path. Sub-page rendering itself stays on the
+                    # ``SUBTOPIC_PROMPT_V2`` flow; only the parent
+                    # changes routing.
                     sub_coros = [
                         self._compile_subtopic_page(slug, cluster.title, sub_info, sorted_facts)
                         for sub_info in analysis["subpages"]
                     ]
                     sub_results = await asyncio.gather(*sub_coros, return_exceptions=True)
-                    sub_pages: list[WikiPage] = []
+                    raw_sub_pages: list[WikiPage] = []
                     for res in sub_results:
                         if isinstance(res, BaseException):
                             logger.warning(
                                 "WikiCompiler: sub-page failed for topic %s: %s", cluster.title, res
                             )
                         else:
-                            sub_pages.append(res)
+                            raw_sub_pages.append(res)
 
-                    # Filter out empty/minimal sub-pages (< 50 chars of content)
-                    valid_sub_pages: list[WikiPage] = []
-                    for sp in sub_pages:
+                    # Filter out empty/minimal sub-pages (< 50 chars of content).
+                    for sp in raw_sub_pages:
                         if len(sp.content.strip()) >= 50:
-                            valid_sub_pages.append(sp)
+                            sub_pages_for_parent.append(sp)
                         else:
                             logger.info(
                                 "WikiCompiler: discarding empty sub-page '%s' for topic '%s'",
                                 sp.title,
                                 cluster.title,
                             )
-                    sub_pages = valid_sub_pages
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "WikiCompiler: sub-page generation failed for %s, "
+                        "falling back to flat parent page: %s",
+                        cluster.title,
+                        exc,
+                    )
+                    sub_pages_for_parent = []
 
-                    if sub_pages:
-                        # Build parent overview page (without full detail — sub-pages have that)
-                        parent_prompt = self._fmt_prompt(
-                            TOPIC_PROMPT_V2 if v2 else TOPIC_PROMPT,
-                            title=cluster.title,
-                            summary=cluster.summary,
-                            current_state=cluster.current_state,
-                            open_questions=cluster.open_questions,
-                            impact_note=cluster.impact_note,
-                            topic_tags=", ".join(cluster.topic_tags),
-                            date_range_start=cluster.date_range_start,
-                            date_range_end=cluster.date_range_end,
-                            authors=", ".join(cluster.authors),
-                            fact_count=len(member_facts),
-                            key_facts_json=json.dumps(cluster.key_facts, default=str),
-                            decisions_json=json.dumps(cluster.decisions, default=str),
-                            people_json=json.dumps(cluster.people, default=str),
-                            technologies_json=json.dumps(cluster.technologies, default=str),
-                            projects_json=json.dumps(cluster.projects, default=str),
-                            key_entities_json=json.dumps(cluster.key_entities, default=str),
-                            key_relationships_json=json.dumps(
-                                cluster.key_relationships, default=str
-                            ),
-                            member_facts_json=json.dumps(facts_data, default=str),
-                            media_json=json.dumps(media_data, default=str),
-                            related_topics_json=related_topics_json,
+        # Always try the modular path FIRST (regardless of cluster
+        # size). For ≥15-fact clusters, ``sub_pages_for_parent`` may
+        # be non-empty and the planner's ``subpage_cards`` module
+        # picks them up via ``signals.child_count``. For smaller
+        # clusters, the list is empty and ``subpage_cards``'s
+        # predicate (``child_count >= 1``) fails naturally.
+        if member_facts:
+            try:
+                modular_page = await self._try_compile_topic_modular(
+                    cluster, gathered, sorted_facts,
+                    sub_pages=sub_pages_for_parent or None,
+                )
+                if modular_page is not None:
+                    if sub_pages_for_parent:
+                        return [modular_page, *sub_pages_for_parent]
+                    return modular_page
+            except Exception as exc:  # noqa: BLE001 — never block the page on modular failure
+                logger.warning(
+                    "modular_topic_compile_failed_falling_back_to_legacy "
+                    "topic=%s exc_type=%s exc=%s",
+                    cluster.id, type(exc).__name__, exc,
+                )
+            # Modular returned None (catastrophic fallback). Fall back to
+            # the thin-topic legacy path for very small clusters so we
+            # don't render an awkward 5-row table for a 2-fact page.
+            # Only applies to clusters that didn't try the sub-page split.
+            if (
+                v2
+                and not sub_pages_for_parent
+                and len(member_facts) < _THIN_TOPIC_THRESHOLD
+            ):
+                return await self._compile_thin_topic(cluster, gathered)
+        facts_data = [
+            {
+                "memory_text": wrap_untrusted(f.memory_text),
+                "author_name": f.author_name,
+                "quality_score": f.quality_score,
+                "fact_type": f.fact_type,
+                "importance": f.importance,
+                "message_ts": f.message_ts,
+                "thread_context_summary": f.thread_context_summary,
+            }
+            for f in sorted_facts[:30]
+        ]
+        media_data = _build_media_data(member_facts)
+        # ``slug`` is computed once at the top of this method now; do
+        # not shadow.
+
+        # Build related topics data for cross-references
+        all_clusters = gathered["clusters"]
+        related_topics = []
+        for rid in getattr(cluster, "related_cluster_ids", []):
+            for rc in all_clusters:
+                if rc.id == rid:
+                    related_topics.append(
+                        {"id": f"topic-{_slugify(rc.title) or rc.id}", "title": rc.title}
+                    )
+                    break
+        related_topics_json = json.dumps(related_topics, default=str)
+
+        # Sub-page assembly for large clusters. When modular ran first
+        # we already produced sub-pages (``sub_pages_for_parent``); the
+        # legacy parent-prompt path reuses them rather than re-running
+        # ``_analyze_topic`` + ``_compile_subtopic_page`` (would double
+        # the LLM bill). When modular wasn't attempted (no member
+        # facts) ``sub_pages_for_parent`` is empty and we fall through
+        # to the flat parent path below.
+        if len(member_facts) >= TOPIC_SUBPAGE_THRESHOLD:
+            sub_pages: list[WikiPage] = list(sub_pages_for_parent)
+            if sub_pages:
+                try:
+                    # Build parent overview page (without full detail — sub-pages have that)
+                    parent_prompt = self._fmt_prompt(
+                        TOPIC_PROMPT_V2 if v2 else TOPIC_PROMPT,
+                        title=cluster.title,
+                        summary=cluster.summary,
+                        current_state=cluster.current_state,
+                        open_questions=cluster.open_questions,
+                        impact_note=cluster.impact_note,
+                        topic_tags=", ".join(cluster.topic_tags),
+                        date_range_start=cluster.date_range_start,
+                        date_range_end=cluster.date_range_end,
+                        authors=", ".join(cluster.authors),
+                        fact_count=len(member_facts),
+                        key_facts_json=json.dumps(cluster.key_facts, default=str),
+                        decisions_json=json.dumps(cluster.decisions, default=str),
+                        people_json=json.dumps(cluster.people, default=str),
+                        technologies_json=json.dumps(cluster.technologies, default=str),
+                        projects_json=json.dumps(cluster.projects, default=str),
+                        key_entities_json=json.dumps(cluster.key_entities, default=str),
+                        key_relationships_json=json.dumps(
+                            cluster.key_relationships, default=str
+                        ),
+                        member_facts_json=json.dumps(facts_data, default=str),
+                        media_json=json.dumps(media_data, default=str),
+                        related_topics_json=related_topics_json,
+                    )
+                    parent_result = await self._call_llm(parent_prompt, page_kind="topic")
+                    parent_content = parent_result.content
+                    if v2:
+                        parent_content = self._postprocess_content(parent_content)
+                        parent_content = _splice_key_facts_table(
+                            parent_content, cluster.key_facts
                         )
-                        parent_result = await self._call_llm(parent_prompt, page_kind="topic")
-                        parent_content = parent_result.content
-                        if v2:
-                            parent_content = self._postprocess_content(parent_content)
-                            parent_content = _splice_key_facts_table(
-                                parent_content, cluster.key_facts
-                            )
-                        children_refs = [
-                            WikiPageRef(
-                                id=sp.id,
-                                title=sp.title,
-                                slug=sp.slug,
-                                section_number="",
-                                memory_count=sp.memory_count,
-                            )
-                            for sp in sub_pages
-                        ]
-                        final_parent_content = parent_content if v2 else parent_result.content
-                        parent_page = WikiPage(
-                            id=f"topic-{slug}",
-                            slug=slug,
-                            title=cluster.title,
-                            page_type="topic",
-                            content=final_parent_content,
-                            summary=parent_result.summary,
-                            memory_count=cluster.member_count,
-                            size_tier=_compute_size_tier(cluster.member_count),
-                            citations=self._filter_citations_to_body(
-                                final_parent_content, _build_citations(sorted_facts[:20])
-                            ),
-                            children=children_refs,
+                    children_refs = [
+                        WikiPageRef(
+                            id=sp.id,
+                            title=sp.title,
+                            slug=sp.slug,
+                            section_number="",
+                            memory_count=sp.memory_count,
                         )
-                        return [parent_page, *sub_pages]
+                        for sp in sub_pages
+                    ]
+                    final_parent_content = parent_content if v2 else parent_result.content
+                    parent_page = WikiPage(
+                        id=f"topic-{slug}",
+                        slug=slug,
+                        title=cluster.title,
+                        page_type="topic",
+                        content=final_parent_content,
+                        summary=parent_result.summary,
+                        memory_count=cluster.member_count,
+                        size_tier=_compute_size_tier(cluster.member_count),
+                        citations=self._filter_citations_to_body(
+                            final_parent_content, _build_citations(sorted_facts[:20])
+                        ),
+                        children=children_refs,
+                    )
+                    return [parent_page, *sub_pages]
                 except Exception as exc:
                     logger.warning(
                         "WikiCompiler: sub-page generation failed for %s, falling back to flat page: %s",
