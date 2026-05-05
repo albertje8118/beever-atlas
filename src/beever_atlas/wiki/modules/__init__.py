@@ -218,6 +218,17 @@ def _is_folder_with_min_decisions(n: int) -> SelectionPredicate:
     return pred
 
 
+def _has_tensions() -> SelectionPredicate:
+    """Eligible when the cluster has at least one detected tension.
+
+    The detector (``tension_detector.detect_tensions``) runs at
+    ``compute_signals`` time and populates ``signals["tension_count"]``.
+    Pre-Phase-3 documents (no ``sentiment`` field on facts) can never
+    fire a tension, so this predicate naturally collapses to False on
+    legacy data."""
+    return lambda s: int(s.get("tension_count", 0)) >= 1
+
+
 # ---------------------------------------------------------------------------
 # The catalog — single source of truth.
 # ---------------------------------------------------------------------------
@@ -236,6 +247,13 @@ MODULE_CATALOG: dict[str, ModuleSpec] = {
         label="Decision",
         description="Spotlight banner for single-decision topic pages — surfaces the chosen decision (capitalized headline + optional body), who decided, when, and (Phase 3) rationale / alternatives rejected / open consequences. Only fires when archetype == 'decision' (the page is centered on the decision, not just one decision among many facts).",
         eligible=_is_decision_archetype(),
+        renderer_kind="frontend",
+    ),
+    "tension_callout": ModuleSpec(
+        id="tension_callout",
+        label="Tension",
+        description="Yellow-bordered callout spotlighting a contradicting position pair within the topic — e.g. one contributor recommends X, another flags X as concerning. Activated when ``tension_count >= 1`` (heuristic detector pairs opinion-typed facts with opposing sentiments and shared entity tags). Place IMMEDIATELY after hero_summary (or after decision_banner on Decision-archetype pages) — tensions are high-signal and belong near the top.",
+        eligible=_has_tensions(),
         renderer_kind="frontend",
     ),
     "key_facts": ModuleSpec(

@@ -149,6 +149,16 @@ def _extract_media_for_module(
             render_inputs.get("facts") or [],
             render_inputs.get("member_facts") or [],
         )
+    if module_id == "tension_callout":
+        from beever_atlas.wiki.modules.tension_callout import (
+            build_tension_callout_data,
+        )
+
+        # Detector reads facts directly — pass the raw cluster facts
+        # (member_facts as fallback) so the callout sees the same
+        # data the planner saw via ``signals["tension_count"]``.
+        pool = render_inputs.get("facts") or render_inputs.get("member_facts") or []
+        return build_tension_callout_data(pool)
     if module_id == "folder_stats":
         from beever_atlas.wiki.modules.folder_stats import (
             build_folder_stats_data,

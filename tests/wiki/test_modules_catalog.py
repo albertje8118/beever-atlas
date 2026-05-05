@@ -14,13 +14,14 @@ from beever_atlas.wiki.modules import (
 
 
 def test_catalog_has_all_documented_modules() -> None:
-    """The 25 module IDs declared in the spec MUST all exist in the
+    """The 26 module IDs declared in the spec MUST all exist in the
     catalog. Adding/removing modules requires updating the spec — this
     guard catches code-only drift."""
     expected = {
         # Content
         "hero_summary",
         "decision_banner",  # archetype-aware spotlight (Phase 4 prep)
+        "tension_callout",  # heuristic tension detector (Phase 4)
         "key_facts",
         "decision_log",
         "timeline",
@@ -82,14 +83,16 @@ def test_list_module_ids_stable_order() -> None:
     ids = list_module_ids()
     assert ids[0] == "hero_summary"  # first in catalog (always module #1)
     assert ids[1] == "decision_banner"  # archetype-aware spotlight (module #2 on Decision pages)
-    assert ids[2] == "key_facts"  # third in catalog
+    assert ids[2] == "tension_callout"  # heuristic-detected contradicting position pair
+    assert ids[3] == "key_facts"  # spine content begins after archetype-spotlights
     # Folder-archetype modules sit at the END of the catalog (after
     # ``provenance_drawer``); they only fire on folder index pages.
     assert ids[-1] == "cross_cutting_decisions"
     assert "provenance_drawer" in ids
     assert "folder_stats" in ids
     assert "top_contributors" in ids
-    assert len(ids) == 25
+    assert "tension_callout" in ids
+    assert len(ids) == 26
 
 
 def test_eligible_predicates_handle_missing_signals() -> None:

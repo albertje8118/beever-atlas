@@ -247,3 +247,72 @@ def test_module_plan_to_dict_round_trip() -> None:
 def test_module_plan_is_empty_predicate() -> None:
     assert ModulePlan().is_empty() is True
     assert ModulePlan(modules=[{"id": "x"}]).is_empty() is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 tension detection — compute_signals wires the real detector
+# in, so ``tension_count`` reflects opposing-sentiment opinion pairs
+# sharing an entity tag (Phase 3 sentiment field is REQUIRED).
+# ---------------------------------------------------------------------------
+
+
+def test_compute_signals_tension_count_zero_when_no_sentiment() -> None:
+    """Pre-Phase-3 facts (no sentiment field) cannot ever fire a
+    tension — the detector skips facts whose sentiment is null. This
+    guards the quality gate documented on AtomicFact.sentiment."""
+    facts = [
+        {"fact_type": "opinion", "author_name": "A", "entity_tags": ["X"]},
+        {"fact_type": "opinion", "author_name": "B", "entity_tags": ["X"]},
+    ]
+    signals = compute_signals(cluster={"title": "T", "member_facts": facts})
+    assert signals["tension_count"] == 0
+
+
+def test_compute_signals_tension_count_one_when_pair_detected() -> None:
+    """A 2-fact cluster with opposing sentiments + shared entity MUST
+    surface as ``tension_count == 1``. This is the canonical case the
+    Phase 4 detector activates."""
+    facts = [
+        {
+            "id": "f1",
+            "fact_type": "opinion",
+            "author_name": "Jacky",
+            "memory_text": "Custom is tuned for our pipeline.",
+            "sentiment": "positive",
+            "entity_tags": ["X"],
+            "message_ts": "2026-04-22T10:00:00Z",
+        },
+        {
+            "id": "f2",
+            "fact_type": "opinion",
+            "author_name": "Thomas",
+            "memory_text": "Custom will rot — switch.",
+            "sentiment": "concerning",
+            "entity_tags": ["X"],
+            "message_ts": "2026-04-23T10:00:00Z",
+        },
+    ]
+    signals = compute_signals(cluster={"title": "T", "member_facts": facts})
+    assert signals["tension_count"] == 1
+
+
+def test_compute_signals_tension_count_zero_when_no_shared_entity() -> None:
+    """Opposing sentiments on different subjects do NOT count — the
+    heuristic requires shared entity overlap to avoid false positives
+    across unrelated topics that just happened to be co-clustered."""
+    facts = [
+        {
+            "id": "f1",
+            "fact_type": "opinion",
+            "sentiment": "positive",
+            "entity_tags": ["X"],
+        },
+        {
+            "id": "f2",
+            "fact_type": "opinion",
+            "sentiment": "concerning",
+            "entity_tags": ["Y"],
+        },
+    ]
+    signals = compute_signals(cluster={"title": "T", "member_facts": facts})
+    assert signals["tension_count"] == 0

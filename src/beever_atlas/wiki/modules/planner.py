@@ -273,12 +273,18 @@ def compute_signals(
                 distinct_contributor_set.add(name)
     distinct_contributor_count = len(distinct_contributor_set)
 
-    # Archetype-detection placeholders — Phase 3 (extraction enrichment)
-    # will populate ``tension_count`` (conflict-typed facts) and
-    # ``person_fact_count`` (facts about a single person). For Phase 4
-    # prep we set them to 0 so the archetype derivation is total but
-    # only the ``decision`` archetype can fire today.
-    tension_count = 0
+    # Phase 4 tension detection — runs at signal-compute time so the
+    # planner sees a real count when sentiment-enriched facts are
+    # present. The detector is a pure heuristic over the cluster's
+    # facts (no LLM call). Pre-Phase-3 facts (no ``sentiment``) can
+    # never fire a tension, so legacy data collapses to 0 naturally.
+    from beever_atlas.wiki.modules.tension_detector import detect_tensions
+
+    tension_result = detect_tensions(facts if isinstance(facts, list) else [])
+    tension_count = len(tension_result.get("tensions", []))
+    # ``person_fact_count`` remains a placeholder — Phase 5 enrichment
+    # will populate it. Setting to 0 keeps the archetype derivation
+    # total without firing the ``person`` branch today.
     person_fact_count = 0
     media_count = (
         len(media_by_kind["hero_candidate"])
@@ -503,6 +509,7 @@ def _validate_plan(
 _HUMAN_RULES: dict[str, str] = {
     "hero_summary": "ALWAYS pick when fact_count ≥ 1. MUST be module #1 in your plan — the bold TL;DR + summary lead the page.",
     "decision_banner": "Pick when archetype == 'decision' (signals.archetype). MUST be module #2 (right after hero_summary) for Decision-archetype pages — the page is centered on the decision, so it gets a spotlight banner instead of a buried key_facts row.",
+    "tension_callout": "Pick when tension_count ≥ 1. Place IMMEDIATELY after hero_summary on Topic pages (module #2). On Decision-archetype pages place it after decision_banner (module #3 — decision_banner stays at #2 because it IS the page subject; tension comes next). Tensions are high-signal contradictions surfaced by the heuristic detector — they belong near the top, never below key_facts.",
     "key_facts": "Pick when fact_count ≥ 5.",
     "decision_log": "Pick when decision_count ≥ 1.",
     "timeline": "Pick when event_count ≥ 4 AND event_span_days ≥ 14.",

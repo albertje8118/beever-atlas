@@ -43,6 +43,7 @@ import { ProvenanceDrawerModule } from "./ProvenanceDrawerModule";
 import { AcronymLegendModule } from "./AcronymLegendModule";
 import { StatStripModule } from "./StatStripModule";
 import { DecisionBannerModule } from "./DecisionBannerModule";
+import { TensionCalloutModule } from "./TensionCalloutModule";
 import { FolderStatsModule } from "./FolderStatsModule";
 import { TopContributorsModule } from "./TopContributorsModule";
 import { CrossCuttingDecisionsModule } from "./CrossCuttingDecisionsModule";
@@ -216,6 +217,8 @@ function dispatchModule(module: WikiPageModule, props: ModuleProps) {
       return <StatStripModule key={module.anchor} {...props} />;
     case "decision_banner":
       return <DecisionBannerModule key={module.anchor} {...props} />;
+    case "tension_callout":
+      return <TensionCalloutModule key={module.anchor} {...props} />;
     case "acronym_legend":
       return <AcronymLegendModule key={module.anchor} {...props} />;
     case "provenance_drawer":

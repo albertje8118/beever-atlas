@@ -87,6 +87,19 @@ class AtomicFact(BaseModel):
     the channel glossary to terms actually used. Empty list when no
     terms detected."""
 
+    # Phase 4 tension detection — additive, optional, default-safe.
+    # Populated at wiki compile time (not extraction time); existing
+    # facts deserialize cleanly without these fields.
+    tension_id: str | None = None
+    """Stable identifier shared by 2+ facts that contradict each other.
+    Format: ``"t_" + 8-char hash``. None when the fact is not part of
+    a detected tension. Surfaced via ``tension_callout`` module."""
+
+    contradicts_fact_id: str | None = None
+    """When this fact is paired with a tension partner, points to the
+    specific other fact's id. Surfaced as a cross-link in the tension
+    callout's positions list."""
+
     @staticmethod
     def deterministic_id(memory_text: str, entity_names: list[str]) -> str:
         """Generate a content-derived deterministic UUID for idempotent upserts.
