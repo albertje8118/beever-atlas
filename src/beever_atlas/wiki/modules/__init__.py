@@ -167,6 +167,14 @@ def _has_video_media() -> SelectionPredicate:
     return lambda s: int(s.get("video_media_count", 0)) >= 1
 
 
+def _has_min_glossary_terms(n: int) -> SelectionPredicate:
+    return lambda s: int(s.get("glossary_terms_used", 0)) >= n
+
+
+def _has_min_numeric_facts(n: int) -> SelectionPredicate:
+    return lambda s: int(s.get("numeric_fact_count", 0)) >= n
+
+
 # ---------------------------------------------------------------------------
 # The catalog — single source of truth.
 # ---------------------------------------------------------------------------
@@ -298,6 +306,28 @@ MODULE_CATALOG: dict[str, ModuleSpec] = {
         label="Video",
         description="Lazy-loaded video embed (YouTube, Vimeo, native file URLs).",
         eligible=_has_video_media(),
+        renderer_kind="frontend",
+    ),
+    # ---- Provenance + reading aids ----
+    "stat_strip": ModuleSpec(
+        id="stat_strip",
+        label="Stats",
+        description="Headline cards surfacing numeric values (counts, currencies, k/M-suffixed metrics) detected in fact text. Conservative regex — false positives are worse than misses.",
+        eligible=_has_min_numeric_facts(3),
+        renderer_kind="frontend",
+    ),
+    "acronym_legend": ModuleSpec(
+        id="acronym_legend",
+        label="Terms used",
+        description="Compact two-column legend of channel-glossary terms that ACTUALLY appear in this page's facts — definitions inline so readers don't jump to the glossary page.",
+        eligible=_has_min_glossary_terms(2),
+        renderer_kind="frontend",
+    ),
+    "provenance_drawer": ModuleSpec(
+        id="provenance_drawer",
+        label="Source messages",
+        description="Always-eligible (≥1 fact) collapsed accordion exposing the source messages each fact came from, with platform deep-links — both humans and LLM agents reading the wiki get a drill-down to the original conversation.",
+        eligible=_always_eligible_with_min_facts(1),
         renderer_kind="frontend",
     ),
 }

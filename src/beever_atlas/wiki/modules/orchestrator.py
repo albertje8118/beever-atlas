@@ -121,6 +121,25 @@ def _extract_media_for_module(
             signals=signals or {},
             facts=render_inputs.get("facts") or [],
         )
+    if module_id == "provenance_drawer":
+        from beever_atlas.wiki.modules.provenance_drawer import (
+            build_provenance_drawer_data,
+        )
+
+        return build_provenance_drawer_data(render_inputs.get("facts") or [])
+    if module_id == "acronym_legend":
+        from beever_atlas.wiki.modules.acronym_legend import (
+            build_acronym_legend_data,
+        )
+
+        return build_acronym_legend_data(
+            render_inputs.get("glossary") or [],
+            render_inputs.get("facts") or [],
+        )
+    if module_id == "stat_strip":
+        from beever_atlas.wiki.modules.stat_strip import build_stat_strip_data
+
+        return build_stat_strip_data(render_inputs.get("facts") or [])
 
     media = render_inputs.get("media") or []
     if not isinstance(media, list):

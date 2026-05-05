@@ -658,9 +658,12 @@ Return JSON ONLY with this exact shape:
 ## Module-selection rules
 
 - **HARD RULE — Module #1 in your plan MUST be `hero_summary` unless `fact_count` is 0.** The hero_summary frontend module reads your `tldr` and `overview` to render the page header (bold TL;DR + summary + stat strip). Skipping it leaves the page without a header.
-- Pick **3 to 7 modules** total (excluding `hero_summary`, which is always present). Below 3 content modules the page reads as a stub; above 7 it reads as a kitchen sink.
+- **HARD RULE — When `numeric_fact_count` ≥ 3, place `stat_strip` IMMEDIATELY after `hero_summary` (module #2).** The numeric values ARE the headline for metric-heavy topics; surfacing them as cards before the prose lets the reader grasp the magnitude in one glance.
+- **HARD RULE — The LAST module in your plan MUST be `provenance_drawer` whenever `fact_count` ≥ 1.** It exposes the source messages each fact came from with platform deep-links — both human readers and LLM agents reading the wiki rely on this drill-down. Place it AFTER `related_threads` (or at the very end when `related_threads` is absent).
+- **HARD RULE — When `glossary_terms_used` ≥ 2, include `acronym_legend` near the END of the page (just before `provenance_drawer` when both are present).** Readers reach the legend after working through the prose; placing it at the top wastes header real estate.
+- Pick **3 to 7 modules** total (excluding `hero_summary` and `provenance_drawer`, which are always present when their rules fire). Below 3 content modules the page reads as a stub; above 7 it reads as a kitchen sink.
 - A module is ELIGIBLE only when its selection rule (in the catalog above) is satisfied. Do NOT pick a module whose rule is not met — the validator will drop it.
-- Order modules by reading priority: hero_summary first, then facts/decisions, then supporting visuals, then related/navigation last.
+- Order modules by reading priority: hero_summary first, then stat_strip (when present), then facts/decisions, then supporting visuals, then related_threads, then acronym_legend, then provenance_drawer LAST.
 - Anchors are lowercase + alphanumeric + dashes, ≤ 24 chars (e.g., `decision-log`, `related-threads`).
 - For media: pick AT MOST ONE `media_hero` per page. Pin `media_inline` items to a fact_id. Pool unpinned media into `media_gallery`.
 

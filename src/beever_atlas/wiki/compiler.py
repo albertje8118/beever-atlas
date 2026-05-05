@@ -3429,6 +3429,34 @@ class WikiCompiler:
                     })
                     break
 
+        # Glossary plumbing — surface the channel's glossary so the
+        # ``acronym_legend`` module can filter to terms that ACTUALLY
+        # appear on this page. Channel-level ``glossary_terms`` is a
+        # list of strings; we coerce to dicts so the module's builder
+        # has a uniform shape.
+        channel_summary_obj = gathered.get("channel_summary")
+        raw_glossary = (
+            getattr(channel_summary_obj, "glossary_terms", None) or []
+        )
+        glossary_data: list[dict] = []
+        for entry in raw_glossary:
+            if isinstance(entry, dict):
+                glossary_data.append(
+                    {
+                        "term": str(entry.get("term") or "").strip(),
+                        "definition": str(entry.get("definition") or "").strip(),
+                        "first_mentioned_by": str(
+                            entry.get("first_mentioned_by")
+                            or entry.get("author")
+                            or ""
+                        ).strip(),
+                    }
+                )
+            elif isinstance(entry, str) and entry.strip():
+                glossary_data.append(
+                    {"term": entry.strip(), "definition": "", "first_mentioned_by": ""}
+                )
+
         render_inputs = {
             "facts": [
                 {**f, "memory_text": f["memory_text"]} for f in facts_data
@@ -3438,6 +3466,7 @@ class WikiCompiler:
             "relationships": relationships_data,
             "open_questions": open_questions_data,
             "related_topics": related_topics_data,
+            "glossary": glossary_data,
             # Other keys (events, alternatives, criteria, pros, cons,
             # quotes, process_steps, process_edges, children, media)
             # are not yet populated — modules requiring them will
@@ -3457,6 +3486,7 @@ class WikiCompiler:
             relationships=relationships_data,
             open_questions=open_questions_data,
             related_topics=related_topics_data,
+            glossary=glossary_data,
         )
 
         # Top-N projections for the writer's prose context.

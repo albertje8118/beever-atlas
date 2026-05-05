@@ -14,7 +14,7 @@ from beever_atlas.wiki.modules import (
 
 
 def test_catalog_has_all_documented_modules() -> None:
-    """The 18 module IDs declared in the spec MUST all exist in the
+    """The 21 module IDs declared in the spec MUST all exist in the
     catalog. Adding/removing modules requires updating the spec — this
     guard catches code-only drift."""
     expected = {
@@ -38,6 +38,10 @@ def test_catalog_has_all_documented_modules() -> None:
         "link_card",
         "pdf_preview",
         "video_embed",
+        # Provenance + reading aids (content-fullness pass)
+        "stat_strip",
+        "acronym_legend",
+        "provenance_drawer",
     }
     assert set(MODULE_CATALOG.keys()) == expected
 
@@ -73,8 +77,8 @@ def test_list_module_ids_stable_order() -> None:
     ids = list_module_ids()
     assert ids[0] == "hero_summary"  # first in catalog (always module #1)
     assert ids[1] == "key_facts"  # second in catalog
-    assert ids[-1] == "video_embed"  # last in catalog
-    assert len(ids) == 18
+    assert ids[-1] == "provenance_drawer"  # last in catalog (always last on the page)
+    assert len(ids) == 21
 
 
 def test_eligible_predicates_handle_missing_signals() -> None:

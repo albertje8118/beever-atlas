@@ -39,6 +39,9 @@ import { MediaGalleryModule } from "./MediaGalleryModule";
 import { LinkCardModule } from "./LinkCardModule";
 import { PdfPreviewModule } from "./PdfPreviewModule";
 import { VideoEmbedModule } from "./VideoEmbedModule";
+import { ProvenanceDrawerModule } from "./ProvenanceDrawerModule";
+import { AcronymLegendModule } from "./AcronymLegendModule";
+import { StatStripModule } from "./StatStripModule";
 
 export interface ModuleProps {
   module: WikiPageModule;
@@ -102,6 +105,18 @@ export function ModuleRenderer({
             return <PdfPreviewModule key={module.anchor} {...props} />;
           case "video_embed":
             return <VideoEmbedModule key={module.anchor} {...props} />;
+          // Provenance + reading-aid modules — frontend-only renderers
+          // consume the structured ``module.data`` payload built by the
+          // matching Python builder (provenance_drawer / acronym_legend
+          // / stat_strip). All 3 are content-fullness modules added to
+          // give human readers + LLM agents richer access to the same
+          // source data.
+          case "stat_strip":
+            return <StatStripModule key={module.anchor} {...props} />;
+          case "acronym_legend":
+            return <AcronymLegendModule key={module.anchor} {...props} />;
+          case "provenance_drawer":
+            return <ProvenanceDrawerModule key={module.anchor} {...props} />;
           default:
             // Unknown module ID — silently drop. The backend's
             // validator should have rejected it before persistence;

@@ -76,6 +76,7 @@ def compute_signals(
     process_steps: list[dict] | None = None,
     alternatives: list[str] | None = None,
     pros_cons_confidence: float = 0.0,
+    glossary: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Aggregate cluster signals the planner consults.
 
@@ -96,6 +97,7 @@ def compute_signals(
     open_questions = open_questions or []
     process_steps = process_steps or []
     alternatives = alternatives or []
+    glossary = glossary or []
 
     # Event span — the spread (in days) between earliest and latest
     # event-typed facts. ``timeline`` module needs both ≥4 events AND
@@ -213,6 +215,28 @@ def compute_signals(
         elif kind == "link" or url.startswith("http"):
             media_by_kind["link"].append(m)
 
+    # Glossary terms used on the page — counts distinct glossary
+    # entries whose term matches at least one fact body. Feeds the
+    # ``acronym_legend`` predicate.
+    if glossary and isinstance(facts, list):
+        from beever_atlas.wiki.modules.acronym_legend import (
+            count_glossary_terms_used,
+        )
+        glossary_terms_used = count_glossary_terms_used(glossary, facts)
+    else:
+        glossary_terms_used = 0
+
+    # Numeric facts — count of facts whose memory_text contains at
+    # least one stat-shaped numeric value (currency, k/M-suffix,
+    # comma-grouped int, or plain int ≥ 100). Feeds the ``stat_strip``
+    # predicate.
+    if isinstance(facts, list):
+        from beever_atlas.wiki.modules.stat_strip import count_numeric_facts
+
+        numeric_fact_count = count_numeric_facts(facts)
+    else:
+        numeric_fact_count = 0
+
     return {
         "title": cluster.get("title") or "",
         "fact_count": fact_count,
@@ -237,6 +261,8 @@ def compute_signals(
         "link_media_count": len(media_by_kind["link"]),
         "pdf_media_count": len(media_by_kind["pdf"]),
         "video_media_count": len(media_by_kind["video"]),
+        "glossary_terms_used": glossary_terms_used,
+        "numeric_fact_count": numeric_fact_count,
     }
 
 
@@ -351,4 +377,7 @@ _HUMAN_RULES: dict[str, str] = {
     "link_card": "Pick when link_media_count ≥ 1.",
     "pdf_preview": "Pick when pdf_media_count ≥ 1.",
     "video_embed": "Pick when video_media_count ≥ 1.",
+    "stat_strip": "Pick when numeric_fact_count ≥ 3. Place it directly after `hero_summary` (top of page) — the numbers ARE the headline.",
+    "acronym_legend": "Pick when glossary_terms_used ≥ 2. Place near the bottom of the page so readers resolve unfamiliar acronyms after the main content.",
+    "provenance_drawer": "ALWAYS pick when fact_count ≥ 1. MUST be the LAST module in your plan — gives readers (and LLM agents) a drill-down to the original conversation.",
 }
