@@ -120,6 +120,35 @@ def compute_signals(
     else:
         event_span_days = 0
 
+    # Edge-shape signals — used by the suppression pass to drop
+    # entity diagrams where one pair dominates with synonymous verbs
+    # (a relation-extraction failure mode), and to drop flow charts
+    # that have no directed connections.
+    edge_pair_counts: dict[tuple[str, str], int] = {}
+    edge_verbs: set[str] = set()
+    for rel in relationships:
+        if not isinstance(rel, dict):
+            continue
+        src = str(rel.get("from") or "")
+        dst = str(rel.get("to") or "")
+        if src and dst:
+            key = (src, dst)
+            edge_pair_counts[key] = edge_pair_counts.get(key, 0) + 1
+        verb = str(rel.get("label") or rel.get("type") or "").strip()
+        if verb:
+            edge_verbs.add(verb)
+    max_edges_between_same_pair = max(edge_pair_counts.values()) if edge_pair_counts else 0
+    distinct_edge_verbs = len(edge_verbs)
+
+    # Process-step edges — count of process_steps items that declare a
+    # ``to`` field (directed edge). Used to drop flow_chart modules
+    # whose nodes are all isolated.
+    process_step_edge_count = sum(
+        1
+        for step in process_steps
+        if isinstance(step, dict) and str(step.get("to") or "").strip()
+    )
+
     # Strong-claim authors — distinct authors making opinion / decision
     # / claim-typed facts. Surface for ``quote_highlights`` eligibility.
     strong_claim_types = {"opinion", "claim", "decision", "recommendation"}
@@ -196,6 +225,9 @@ def compute_signals(
         "process_step_count": len(process_steps),
         "entity_count": len(entities),
         "entity_edge_count": len(relationships),
+        "max_edges_between_same_pair": max_edges_between_same_pair,
+        "distinct_edge_verbs": distinct_edge_verbs,
+        "process_step_edge_count": process_step_edge_count,
         "open_question_count": len(open_questions),
         "child_count": int(cluster.get("child_count", 0)),
         "related_topics": related_topics,
@@ -308,10 +340,10 @@ _HUMAN_RULES: dict[str, str] = {
     "comparison_matrix": "Pick when alternative_count ≥ 2.",
     "pros_cons": "Pick when pros_cons_confidence ≥ 0.7 (you set this; ≥ 0.7 = explicit trade-off discussion).",
     "quote_highlights": "Pick when strong_claim_author_count ≥ 3.",
-    "flow_chart": "Pick when process_step_count ≥ 4.",
-    "entity_diagram": "Pick when entity_count ≥ 3 AND entity_edge_count ≥ 5.",
+    "flow_chart": "Pick when process_step_count ≥ 4. Skipped post-validation if process_step_edge_count == 0 (orphan steps look like noise).",
+    "entity_diagram": "Pick when entity_count ≥ 3 AND entity_edge_count ≥ 5. Skipped post-validation if a single (source, target) pair dominates with > 5 edges and only one verb, OR if distinct_edge_verbs < 2 (relation-extraction noise).",
     "open_questions": "Pick when open_question_count ≥ 1.",
-    "subpage_cards": "Pick when child_count ≥ 1 (only on parent topics that own sub-pages).",
+    "subpage_cards": "Pick when child_count ≥ 2 — a single child reads better as an inline link, so child_count == 1 is suppressed post-validation.",
     "related_threads": "Pick when at least one related topic has score ≥ 0.4.",
     "media_hero": "Pick when has_media_hero_candidate is true. AT MOST ONE per page.",
     "media_inline": "Pick when inline_media_count ≥ 1. Place each marker adjacent to the paragraph mentioning the source fact.",

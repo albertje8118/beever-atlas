@@ -85,6 +85,79 @@ def test_compute_signals_strong_claim_authors_distinct() -> None:
     assert signals["strong_claim_author_count"] == 3  # Jacky, Thomas, Alan
 
 
+def test_compute_signals_max_edges_between_same_pair_finds_dominant_pair() -> None:
+    relationships = [
+        # 3 edges between (A, B) — all different verbs.
+        {"from": "A", "to": "B", "label": "owns"},
+        {"from": "A", "to": "B", "label": "supports"},
+        {"from": "A", "to": "B", "label": "deprecates"},
+        # 1 edge between (B, C).
+        {"from": "B", "to": "C", "label": "supports"},
+        # 1 edge between (A, C).
+        {"from": "A", "to": "C", "label": "links"},
+    ]
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, relationships=relationships
+    )
+    assert signals["max_edges_between_same_pair"] == 3
+    # Verbs: owns, supports, deprecates, links → 4 distinct.
+    assert signals["distinct_edge_verbs"] == 4
+
+
+def test_compute_signals_distinct_edge_verbs_counts_unique_labels() -> None:
+    relationships = [
+        {"from": "A", "to": "B", "label": "REFERS"},
+        {"from": "A", "to": "C", "label": "REFERS"},
+        {"from": "B", "to": "C", "label": "REFERS"},
+    ]
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, relationships=relationships
+    )
+    assert signals["distinct_edge_verbs"] == 1
+    assert signals["max_edges_between_same_pair"] == 1
+
+
+def test_compute_signals_distinct_edge_verbs_uses_type_field_when_label_missing() -> None:
+    relationships = [
+        {"from": "A", "to": "B", "type": "REFERS"},
+        {"from": "A", "to": "C", "type": "ASSIGNED_ROLE"},
+    ]
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, relationships=relationships
+    )
+    assert signals["distinct_edge_verbs"] == 2
+
+
+def test_compute_signals_edge_signals_handle_empty_relationships() -> None:
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, relationships=[]
+    )
+    assert signals["max_edges_between_same_pair"] == 0
+    assert signals["distinct_edge_verbs"] == 0
+
+
+def test_compute_signals_process_step_edge_count_counts_directed_edges() -> None:
+    process_steps = [
+        {"id": "s1", "label": "Start", "to": "s2"},
+        {"id": "s2", "label": "Middle", "to": "s3"},
+        {"id": "s3", "label": "End"},  # no `to` field → orphan
+        {"id": "s4", "label": "Orphan"},  # no `to` field → orphan
+    ]
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, process_steps=process_steps
+    )
+    assert signals["process_step_edge_count"] == 2
+    assert signals["process_step_count"] == 4
+
+
+def test_compute_signals_process_step_edge_count_zero_when_all_orphans() -> None:
+    process_steps = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]
+    signals = compute_signals(
+        cluster={"title": "T", "member_facts": []}, process_steps=process_steps
+    )
+    assert signals["process_step_edge_count"] == 0
+
+
 def test_compute_signals_handles_missing_dates_gracefully() -> None:
     cluster = {
         "title": "T",

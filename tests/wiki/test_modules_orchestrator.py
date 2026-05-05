@@ -47,11 +47,13 @@ def _signals_for_test() -> dict:
         decisions=[{"decision": "X"}, {"decision": "Y"}, {"decision": "Z"}],
         entities=[{"id": "E1"}, {"id": "E2"}, {"id": "E3"}],
         relationships=[
-            {"from": "E1", "to": "E2"},
-            {"from": "E2", "to": "E3"},
-            {"from": "E3", "to": "E1"},
-            {"from": "E1", "to": "E3"},
-            {"from": "E2", "to": "E1"},
+            # Diverse verbs so the suppression pass keeps the diagram
+            # (distinct_edge_verbs ≥ 2 + no single dominant pair).
+            {"from": "E1", "to": "E2", "label": "replaces"},
+            {"from": "E2", "to": "E3", "label": "supports"},
+            {"from": "E3", "to": "E1", "label": "issues"},
+            {"from": "E1", "to": "E3", "label": "validates against"},
+            {"from": "E2", "to": "E1", "label": "deprecated by"},
         ],
         open_questions=[{"question": "What about token rotation?"}],
     )

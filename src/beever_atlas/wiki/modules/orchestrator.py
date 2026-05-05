@@ -27,6 +27,7 @@ import importlib
 import inspect
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -381,6 +382,138 @@ def _assemble_content(tldr: str, overview: str, substituted_body: str) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+# ---------------------------------------------------------------------------
+# Suppression pass — drops modules whose data shape passes the
+# eligibility predicate but whose RENDERED output would be empty or
+# noise-only. Runs AFTER ``_validate_plan`` and BEFORE marker
+# substitution. Validator checks data SHAPE; this pass checks
+# rendered SUBSTANCE.
+#
+# Rules:
+#   1. ``entity_diagram`` noise — one dominant pair (>5 edges) AND
+#      only one distinct relation verb across the graph
+#   2. ``entity_diagram`` thin — fewer than 2 distinct edge verbs
+#      (the same verb everywhere is relation-extraction noise)
+#   3. ``flow_chart`` no-edges — process steps have zero ``to`` fields
+#   4. ``subpage_cards`` singleton — exactly one child (use inline
+#      link instead)
+#
+# The post-render Mermaid-empty rule lives separately
+# (``_suppress_empty_mermaid_modules``) because it requires the
+# rendered markdown.
+# ---------------------------------------------------------------------------
+
+
+def _suppress_thin_modules(
+    plan: ModulePlan,
+    signals: dict[str, Any],
+    render_inputs: dict[str, Any],
+    *,
+    page_id: str = "<unknown>",
+) -> ModulePlan:
+    """Drop modules whose rendered output would be thin or noise-only.
+
+    Returns a NEW ``ModulePlan`` with the dropped modules removed —
+    input is not mutated. Each suppression decision logs a structured
+    telemetry line so soak runs can identify persistently-bad picks
+    per module type.
+    """
+    max_pair_edges = int(signals.get("max_edges_between_same_pair", 0))
+    distinct_verbs = int(signals.get("distinct_edge_verbs", 0))
+    process_edge_count = int(signals.get("process_step_edge_count", 0))
+    child_count = int(signals.get("child_count", 0))
+
+    kept: list[dict[str, Any]] = []
+    for entry in plan.modules:
+        mid = str(entry.get("id") or "")
+        reason: str | None = None
+
+        if mid == "entity_diagram":
+            # Rule 1 — one dominant pair, only one verb.
+            if max_pair_edges > 5 and distinct_verbs <= 1:
+                reason = "entity_diagram_dominant_pair_one_verb"
+            # Rule 2 — graph-wide verb diversity below threshold.
+            elif distinct_verbs < 2:
+                reason = "entity_diagram_low_verb_diversity"
+        elif mid == "flow_chart":
+            # Rule 3 — orphan steps (no directed edges).
+            if process_edge_count == 0:
+                reason = "flow_chart_no_directed_edges"
+        elif mid == "subpage_cards":
+            # Rule 4 — singleton parent (zero children handled by
+            # predicate; one child reads better as an inline link).
+            if child_count == 1:
+                reason = "subpage_cards_singleton"
+
+        if reason is not None:
+            logger.info(
+                "module_suppressed reason=%s module=%s page_id=%s",
+                reason, mid, page_id,
+            )
+            continue
+        kept.append(entry)
+
+    return ModulePlan(modules=kept, media_pins=list(plan.media_pins))
+
+
+# Matches a fenced ```mermaid block (multiline). Captures the inner
+# content so callers can count ``-->`` edges. Conservative: matches
+# only when ``mermaid`` is the language tag on the opening fence.
+_MERMAID_BLOCK_RE = re.compile(
+    r"```mermaid\s*\n(.*?)\n```",
+    re.DOTALL,
+)
+
+
+def _mermaid_block_has_no_edges(rendered: str) -> bool:
+    """Return True if the rendered markdown's primary output is a
+    Mermaid block with zero ``-->`` edges.
+
+    Conservative: only fires when the WRAPPING module's output IS a
+    Mermaid block (i.e. the rendered markdown is essentially the
+    fenced block). Modules that embed a Mermaid block inside larger
+    prose are NOT touched.
+    """
+    if not isinstance(rendered, str) or "```mermaid" not in rendered:
+        return False
+    match = _MERMAID_BLOCK_RE.search(rendered)
+    if not match:
+        return False
+    inner = match.group(1)
+    # Edge count uses the literal ``-->`` arrow; mermaid's labelled
+    # form ``A -->|label| B`` contains ``-->`` so this catches both.
+    return "-->" not in inner
+
+
+def _suppress_empty_mermaid_modules(
+    plan: ModulePlan,
+    rendered_modules: dict[str, str],
+    *,
+    page_id: str = "<unknown>",
+) -> tuple[ModulePlan, dict[str, str]]:
+    """After per-module rendering, drop any module whose rendered
+    output is a Mermaid block with zero ``-->`` edges.
+
+    Returns the trimmed plan + the rendered_modules dict with the
+    dropped module IDs removed. General by design — any future
+    Mermaid-emitting module benefits without code changes.
+    """
+    kept: list[dict[str, Any]] = []
+    rendered_kept: dict[str, str] = dict(rendered_modules)
+    for entry in plan.modules:
+        mid = str(entry.get("id") or "")
+        rendered = rendered_modules.get(mid, "")
+        if rendered and _mermaid_block_has_no_edges(rendered):
+            logger.info(
+                "module_suppressed reason=%s module=%s page_id=%s",
+                "mermaid_block_zero_edges", mid, page_id,
+            )
+            rendered_kept.pop(mid, None)
+            continue
+        kept.append(entry)
+    return ModulePlan(modules=kept, media_pins=list(plan.media_pins)), rendered_kept
+
+
 def _parse_compile_json(raw: str) -> dict[str, Any]:
     """Parse the unified prompt's response. Strips a single outer
     markdown fence if the LLM wrapped despite being told not to.
@@ -505,6 +638,12 @@ async def compile_topic_page_modular(
     if not isinstance(plan_dict, dict):
         plan_dict = {}
     plan = _validate_plan(plan_dict, signals)
+    # Suppression pass — predicates check data SHAPE; this checks
+    # rendered SUBSTANCE so we don't ship a 1-child subpage_cards or
+    # an entity_diagram dominated by one (source, target) pair.
+    plan = _suppress_thin_modules(
+        plan, signals, render_inputs, page_id=str(render_inputs.get("page_id") or "<unknown>"),
+    )
     if plan.is_empty():
         logger.info("module_compile_plan_empty_fallback — using key_facts only")
         return _fallback_output(title, render_inputs)
@@ -573,6 +712,16 @@ async def compile_topic_page_modular(
                 "renderer_kind": spec.renderer_kind if spec else "python",
                 "markdown": rendered,
             }
+
+    # Post-render Mermaid suppression — drop modules whose rendered
+    # output is a Mermaid block with zero ``-->`` edges. Must run
+    # AFTER rendering (the check inspects the rendered markdown) but
+    # BEFORE substitution (so the dropped marker is left in the body
+    # and the substitution pass treats it as a stripped placeholder).
+    plan, rendered_modules = _suppress_empty_mermaid_modules(
+        plan, rendered_modules, page_id=str(render_inputs.get("page_id") or "<unknown>"),
+    )
+    rendered_count = len(rendered_modules)
 
     # Stage 5 — substitute markers in the body. Hard-fail wraps in a
     # ``ModuleSubstitutionError`` which we catch and degrade to the
