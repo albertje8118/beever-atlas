@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 # Strip newlines from quote bodies — multi-line quotes break the
 # blockquote prefix on render and produce inconsistent visual blocks.
 _NEWLINE_RE_REPLACEMENTS = (("\r\n", " "), ("\r", " "), ("\n", " "))
@@ -30,7 +32,7 @@ def render(data: dict[str, Any]) -> str:
     for q in quotes:
         if not isinstance(q, dict):
             continue
-        text = _flatten(q.get("text") or "")
+        text = _flatten(_strip_safety_markers(q.get("text") or ""))
         author = (q.get("author") or "").strip()
         date = (q.get("date") or "").strip()
         cite = (q.get("citations") or "").strip()

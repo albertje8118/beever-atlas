@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 # First-sentence detection — same pattern as ``key_facts._first_sentence``
 # but kept inline so the two modules don't develop accidental coupling.
 _FIRST_SENTENCE_RE = re.compile(r"^(.*?[.!?])(?:\s|$)")
@@ -192,7 +194,7 @@ def build_decision_banner_data(
             "fact_id": "",
         }
 
-    body_text = str(
+    body_text = _strip_safety_markers(
         decision_fact.get("memory_text")
         or decision_fact.get("fact")
         or decision_fact.get("text")

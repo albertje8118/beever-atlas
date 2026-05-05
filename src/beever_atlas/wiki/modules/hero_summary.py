@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 
 def _critical_count_from_facts(facts: list[Any] | None) -> int:
     """Count facts whose importance normalises to ``"critical"``.
@@ -89,8 +91,11 @@ def build_hero_summary_data(
     return {
         "label": "Summary",
         "renderer_kind": "frontend",
-        "tldr": (tldr or "").strip(),
-        "summary": (overview or "").strip(),
+        # Strip safety markers in case the LLM echoed fact text into
+        # the tldr / overview verbatim — wrappers must never reach
+        # the frontend.
+        "tldr": _strip_safety_markers(tldr),
+        "summary": _strip_safety_markers(overview),
         "highlights": {
             "critical_count": int(critical_count),
             "decision_count": int(decision_count),

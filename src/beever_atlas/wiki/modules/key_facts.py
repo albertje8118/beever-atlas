@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
 from beever_atlas.wiki.render import render_key_facts_table
 
 
@@ -136,7 +137,11 @@ def build_key_facts_data(facts: list[dict] | None) -> dict[str, Any]:
             or f.get("text")
             or ""
         )
-        body = str(body).strip()
+        # Strip <untrusted>/<sanitized>/<external> wrappers before the
+        # text crosses to the frontend. The orchestrator wraps fact
+        # text for LLM-context defense; the wrappers must NOT survive
+        # to the user-facing card.
+        body = _strip_safety_markers(body)
         title = _first_sentence(body)
         importance = _normalize_importance(f.get("importance"))
         fact_type = _normalize_fact_type(f.get("fact_type") or f.get("type"))

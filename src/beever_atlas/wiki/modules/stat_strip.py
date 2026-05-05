@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 # Maximum stats per page. The strip is meant to be a glanceable
 # headline, not a kitchen sink — beyond 5 the cards shrink to
 # illegibility on tablet/mobile.
@@ -181,13 +183,13 @@ def count_numeric_facts(facts: list[dict] | None) -> int:
     for f in facts:
         if not isinstance(f, dict):
             continue
-        body = (
+        body = _strip_safety_markers(
             f.get("memory_text")
             or f.get("fact")
             or f.get("text")
             or ""
         )
-        if _has_numeric_match(str(body)):
+        if _has_numeric_match(body):
             n += 1
     return n
 
@@ -300,7 +302,7 @@ def build_stat_strip_data(facts: list[dict] | None) -> dict[str, Any]:
     contributing_facts: list[dict] = []
 
     for f in sorted_facts:
-        body = str(
+        body = _strip_safety_markers(
             f.get("memory_text")
             or f.get("fact")
             or f.get("text")

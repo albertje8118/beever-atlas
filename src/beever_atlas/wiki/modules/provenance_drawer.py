@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 # Maximum messages we ship to the frontend. The drawer is collapsed
 # by default; ~25 rows is a comfortable scroll size when expanded.
 # ``total_count`` carries the full size so the frontend can render a
@@ -139,8 +141,10 @@ def build_provenance_drawer_data(facts: list[Any] | None) -> dict[str, Any]:
         )
         # Snippet — prefer the original message body when plumbed
         # through; fall back to the synthesised fact text. Either way
-        # the reader gets something readable.
-        body = (
+        # the reader gets something readable. Strip any safety
+        # markers (``<untrusted>`` etc.) before truncation so the
+        # tags don't leak to the user.
+        body = _strip_safety_markers(
             f.get("source_message_text")
             or f.get("message_text")
             or f.get("memory_text")
@@ -148,7 +152,7 @@ def build_provenance_drawer_data(facts: list[Any] | None) -> dict[str, Any]:
             or f.get("text")
             or ""
         )
-        snippet = _snippet(str(body))
+        snippet = _snippet(body)
 
         existing = grouped.get(key)
         if existing is None:

@@ -67,18 +67,24 @@ def count_glossary_terms_used(
         return 0
 
     # Collect fact bodies once; the regex match is the hot loop.
+    # Strip safety wrappers so they don't influence matching (a tag
+    # like ``<untrusted>`` won't be caught by ``\bTERM\b`` anyway,
+    # but stripping keeps the bodies consistent with what the rest
+    # of the pipeline sees).
+    from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
     bodies: list[str] = []
     for f in facts:
         if not isinstance(f, dict):
             continue
-        body = (
+        body = _strip_safety_markers(
             f.get("memory_text")
             or f.get("fact")
             or f.get("text")
             or ""
         )
         if body:
-            bodies.append(str(body))
+            bodies.append(body)
     if not bodies:
         return 0
 
@@ -126,18 +132,20 @@ def build_acronym_legend_data(
             "items": [],
         }
 
+    from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
     bodies: list[str] = []
     for f in facts:
         if not isinstance(f, dict):
             continue
-        body = (
+        body = _strip_safety_markers(
             f.get("memory_text")
             or f.get("fact")
             or f.get("text")
             or ""
         )
         if body:
-            bodies.append(str(body))
+            bodies.append(body)
 
     items: list[dict[str, Any]] = []
     seen_terms: set[str] = set()
