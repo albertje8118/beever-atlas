@@ -3559,23 +3559,43 @@ class WikiCompiler:
         )
 
     async def _compile_topic_page(self, cluster, gathered: dict) -> WikiPage | list[WikiPage]:
-        """Compile a topic page. Returns a single page or [parent, *sub_pages] for large topics."""
+        """Compile a topic page. Returns a single page or [parent, *sub_pages] for large topics.
+
+        Routing (post v1/v2 unification — see commit history for the
+        original split):
+          1. Modular path (``compile_topic_page_modular``) is the
+             DEFAULT for ALL topic pages with at least 1 fact. The
+             planner picks 3-7 modules from the catalog based on
+             ``compute_signals`` — thin and rich pages alike share one
+             prompt.
+          2. The legacy ``TOPIC_PROMPT`` / ``THIN_TOPIC_PROMPT`` paths
+             remain only as fallbacks for catastrophic modular
+             failures (LLM crash, parse error, total module rejection).
+             Sub-page split clusters (≥15 facts) still use the legacy
+             ``TOPIC_PROMPT_V2`` for the parent overview today; subpage
+             generation is its own pipeline.
+
+        Returns a single page or ``[parent, *sub_pages]`` for large
+        topics that needed splitting.
+        """
         member_facts: list[AtomicFact] = gathered["cluster_facts"].get(cluster.id, [])
-        # Phase 4: thin-topic routing (only when wiki_compiler_v2=ON).
         from beever_atlas.infra.config import get_settings
 
         v2 = get_settings().wiki_compiler_v2
-        if v2 and len(member_facts) < _THIN_TOPIC_THRESHOLD:
-            return await self._compile_thin_topic(cluster, gathered)
         sorted_facts = sorted(member_facts, key=lambda f: f.quality_score, reverse=True)
 
         # ── adaptive-wiki-page-content — modular path ────────────────
-        # Try the new module-aware single-call compiler for normal-sized
-        # topics (not sub-page-split candidates — those have their own
-        # complex logic below). Falls back to the legacy
-        # ``TOPIC_PROMPT`` flow on any failure so this wiring carries
-        # zero risk vs today's behavior.
-        if len(member_facts) < TOPIC_SUBPAGE_THRESHOLD:
+        # Always try the new module-aware single-call compiler FIRST,
+        # regardless of cluster size. The planner adapts the module
+        # mix to the data density (3 modules for thin pages, 5-7 for
+        # rich pages). Routing through one prompt keeps user-facing
+        # output consistent across page sizes.
+        #
+        # Sub-page-split clusters (≥15 facts) still go through the
+        # legacy parent-page assembly below because their pipeline
+        # depends on ``_analyze_topic`` which the modular path doesn't
+        # express today. Loosening that is Round 2.
+        if member_facts and len(member_facts) < TOPIC_SUBPAGE_THRESHOLD:
             try:
                 modular_page = await self._try_compile_topic_modular(
                     cluster, gathered, sorted_facts
@@ -3588,6 +3608,11 @@ class WikiCompiler:
                     "topic=%s exc_type=%s exc=%s",
                     cluster.id, type(exc).__name__, exc,
                 )
+            # Modular returned None (catastrophic fallback). Fall back to
+            # the thin-topic legacy path for very small clusters so we
+            # don't render an awkward 5-row table for a 2-fact page.
+            if v2 and len(member_facts) < _THIN_TOPIC_THRESHOLD:
+                return await self._compile_thin_topic(cluster, gathered)
         facts_data = [
             {
                 "memory_text": wrap_untrusted(f.memory_text),
