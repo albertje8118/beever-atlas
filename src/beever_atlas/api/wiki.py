@@ -192,7 +192,11 @@ async def download_wiki_markdown(
         prefix = f"{section} " if section else ""
         parts.append(f"\n---\n\n## {prefix}{title}\n")
         parts.append(page.get("content", ""))
-        # Append citations
+        # Append citations. Each citation may or may not have a
+        # permalink — earlier extractions sometimes lacked thread
+        # URLs. Skip the trailing markdown link entirely when the
+        # permalink is empty so the export doesn't show an ugly
+        # ``[]()`` tail (#10 in the post-export wiki review).
         citations = page.get("citations", [])
         if citations:
             parts.append("\n\n### Sources\n")
@@ -200,8 +204,13 @@ async def download_wiki_markdown(
                 author = cit.get("author", "")
                 ts = cit.get("timestamp", "")
                 excerpt = cit.get("text_excerpt", "")
-                link = cit.get("permalink", "")
-                parts.append(f"- {cit.get('id', '')} @{author} · {ts} — {excerpt} [{link}]({link})")
+                link = (cit.get("permalink") or "").strip()
+                cit_id = cit.get("id", "")
+                head = f"- {cit_id} @{author} · {ts} — {excerpt}".rstrip()
+                if link:
+                    parts.append(f"{head} [{link}]({link})")
+                else:
+                    parts.append(head)
         parts.append("\n")
 
     md_content = "\n".join(parts)
@@ -250,24 +259,83 @@ async def refresh_wiki(
     channel_id: str,
     background_tasks: BackgroundTasks,
     target_lang: str | None = Query(default=None),
+    mode: str = Query(
+        default="update",
+        description=(
+            "Wiki action intent: 'update' refreshes pages from current "
+            "memories, keeping folder structure intact; 'reorganize' "
+            "additionally re-runs the structure planner; 'rebuild' "
+            "snapshots the current wiki to history, wipes the cache, "
+            "then regenerates from scratch with a fresh folder plan. "
+            "Each value maps to a distinct user-facing button."
+        ),
+    ),
     restructure: bool = Query(
         default=False,
         description=(
-            "When true, force the structure planner to run regardless of "
-            "WIKI_FOLDER_PLANNER. Used by the operator-triggered Restructure "
-            "tree action — see llm-wiki-folder-structure spec."
+            "[DEPRECATED — use ``mode`` instead] When true, force the "
+            "structure planner to run. Kept for backward compat with "
+            "callers still on the legacy ``?restructure=true`` flag — "
+            "treated as ``mode=reorganize``."
         ),
     ),
     principal: Principal = Depends(require_user),
 ) -> dict:
-    """Trigger async wiki generation for a channel."""
+    """Trigger async wiki generation for a channel.
+
+    ``mode`` is the new contract; ``restructure`` is kept as a legacy
+    alias for backward compat. When both are supplied, ``mode`` wins.
+    Unknown ``mode`` values fall back to ``update`` (defensive default
+    so a stale frontend never escalates a request unintentionally).
+    """
     await assert_channel_access(principal, channel_id)
     from beever_atlas.wiki.builder import WikiBuilder
+
+    # Resolve effective mode. Legacy ``restructure=true`` → reorganize.
+    valid_modes = {"update", "reorganize", "rebuild"}
+    effective_mode = mode if mode in valid_modes else "update"
+    if effective_mode == "update" and restructure:
+        effective_mode = "reorganize"
 
     stores = get_stores()
     cache = _get_cache()
     lang = await _resolve_target_lang(channel_id, target_lang)
     builder = WikiBuilder(stores.weaviate, stores.graph, cache)
+
+    # ``rebuild`` is destructive. Preserve the current wiki as a
+    # recoverable version BEFORE the background task fires so the user
+    # always has a rollback point — even if the generator never starts.
+    # The actual cache WIPE is deferred to ``_run_generation`` (inside
+    # the background task) so a crash between request return and task
+    # start can never leave the user with an empty wiki.
+    if effective_mode == "rebuild":
+        try:
+            existing = await cache.get_wiki(channel_id, target_lang=lang)
+            if existing:
+                archived_version = await cache.version_store.archive(
+                    channel_id, existing, target_lang=lang
+                )
+                await cache.version_store.cleanup(channel_id)
+                # Audit log: rebuild is the only mode any authenticated
+                # channel member can use to wipe shared content. Emit a
+                # structured event so admins can trace who triggered it.
+                logger.info(
+                    "wiki_rebuild_snapshot principal=%s channel=%s lang=%s archived_version=%d",
+                    getattr(principal, "id", "unknown"),
+                    channel_id,
+                    lang,
+                    archived_version,
+                )
+        except Exception as exc:  # noqa: BLE001 — never block rebuild on archive failure
+            logger.exception(
+                "wiki_rebuild_snapshot_failed channel=%s lang=%s err=%s",
+                channel_id,
+                lang,
+                exc,
+            )
+
+    force_restructure = effective_mode in ("reorganize", "rebuild")
+    wipe_before_run = effective_mode == "rebuild"
 
     # Set status to "running" immediately so the frontend sees it on first poll
     await cache.set_generation_status(
@@ -279,12 +347,19 @@ async def refresh_wiki(
     )
 
     background_tasks.add_task(
-        _run_generation, builder, channel_id, cache, lang, restructure
+        _run_generation,
+        builder,
+        channel_id,
+        cache,
+        lang,
+        force_restructure,
+        wipe_before_run,
     )
     return {
         "status": "started",
         "channel_id": channel_id,
-        "restructure": restructure,
+        "mode": effective_mode,
+        "restructure": force_restructure,
     }
 
 
@@ -294,8 +369,32 @@ async def _run_generation(
     cache: WikiCache,
     target_lang: str = "en",
     force_restructure: bool = False,
+    wipe_before_run: bool = False,
 ) -> None:
     try:
+        # Wipe is performed HERE (inside the background task) rather than
+        # synchronously in the request handler. This eliminates the
+        # window where the wiki is empty but the generator hasn't
+        # started — if the task scheduler drops the task before this
+        # function runs, the existing cache row remains intact.
+        if wipe_before_run:
+            try:
+                await cache.delete_wiki(channel_id, target_lang=target_lang)
+                logger.info(
+                    "wiki_rebuild_wipe channel=%s lang=%s — cache cleared, generator starting",
+                    channel_id,
+                    target_lang,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Wipe failure is recoverable — the generator will
+                # overwrite the existing cache via save_wiki anyway. Log
+                # for diagnostics but proceed with generation.
+                logger.exception(
+                    "wiki_rebuild_wipe_failed channel=%s lang=%s err=%s — proceeding with generation",
+                    channel_id,
+                    target_lang,
+                    exc,
+                )
         await builder.refresh_wiki(
             channel_id,
             target_lang=target_lang,
@@ -713,11 +812,17 @@ async def get_wiki_graph(
     seen_edges: set[tuple[str, str, str]] = set()
 
     # 1) Wiki page nodes — every visible page in the channel.
+    # Build a parallel ``page_id → slug`` index so the parent_id chain
+    # (which references the persistent page_id, NOT the slug used as
+    # node id) can be resolved when emitting `child_of` edges below.
+    page_id_to_slug: dict[str, str] = {}
     for page in pages:
         slug = page.slug or page.page_id.replace(":", "-")
         if not slug or slug in seen_node_ids:
             continue
         seen_node_ids.add(slug)
+        if page.page_id:
+            page_id_to_slug[page.page_id] = slug
         nodes.append(
             {
                 "data": {
@@ -729,6 +834,36 @@ async def get_wiki_graph(
                     "last_updated": page.updated_at.isoformat()
                     if page.updated_at
                     else "",
+                }
+            }
+        )
+
+    # 1b) Hierarchy edges — every page with ``parent_id`` gets a
+    # ``child_of`` edge to its parent. Without these, the planner-
+    # produced folder tree is invisible in the graph view (folders
+    # render as isolated amber squares with no visible link to the
+    # topics they group). Mirrors the legacy fallback's edge logic.
+    # ``getattr`` defends against partial test mocks that omit
+    # parent_id; real WikiPage instances default it to None.
+    for page in pages:
+        parent_id = getattr(page, "parent_id", None)
+        if not parent_id:
+            continue
+        src_slug = page_id_to_slug.get(page.page_id)
+        dst_slug = page_id_to_slug.get(parent_id)
+        if not src_slug or not dst_slug or src_slug == dst_slug:
+            continue
+        key = (src_slug, dst_slug, "child_of")
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        edges.append(
+            {
+                "data": {
+                    "id": f"e:{src_slug}->{dst_slug}",
+                    "source": src_slug,
+                    "target": dst_slug,
+                    "kind": "child_of",
                 }
             }
         )
@@ -844,32 +979,72 @@ async def get_wiki_graph(
             # this for sub-topics under parent topics). The legacy
             # cache does NOT carry [[wikilink]] cross-references — those
             # only land under WIKI_LLM_NATIVE_REDESIGN.
+            #
+            # The structure planner ALSO commits folder→child links as
+            # an inline ``children: [{id, title, slug, ...}]`` array on
+            # each folder doc, but does NOT round-trip ``parent_id`` back
+            # onto each child page. Walking only ``parent_id`` therefore
+            # misses every planner-produced folder→topic edge. Walk both
+            # the parent_id chain AND each folder's children array so
+            # the graph reflects the same hierarchy the sidebar shows.
             for page_id, page in legacy_pages.items():
                 if not isinstance(page, dict):
                     continue
                 src_id = str(page_id)
+                # Path A — child_of from parent_id (sub-topics under
+                # parent topics; nested folder under root folder).
                 parent_id = page.get("parent_id")
-                if not parent_id or not isinstance(parent_id, str):
+                if (
+                    parent_id
+                    and isinstance(parent_id, str)
+                    and parent_id in seen_node_ids
+                    and src_id in seen_node_ids
+                    and src_id != parent_id
+                ):
+                    key = (src_id, parent_id, "child_of")
+                    if key not in seen_edges:
+                        seen_edges.add(key)
+                        edges.append(
+                            {
+                                "data": {
+                                    "id": f"e:{src_id}->{parent_id}",
+                                    "source": src_id,
+                                    "target": parent_id,
+                                    "kind": "child_of",
+                                    "legacy": True,
+                                }
+                            }
+                        )
+                # Path B — child_of from inline ``children`` array (the
+                # planner-produced folder→topic links). Each entry is
+                # ``{id, title, slug, ...}`` where ``id`` is the child's
+                # page_id used as the graph node id.
+                children = page.get("children")
+                if not isinstance(children, list):
                     continue
-                if parent_id not in seen_node_ids or src_id not in seen_node_ids:
-                    continue
-                if src_id == parent_id:
-                    continue
-                key = (src_id, parent_id, "child_of")
-                if key in seen_edges:
-                    continue
-                seen_edges.add(key)
-                edges.append(
-                    {
-                        "data": {
-                            "id": f"e:{src_id}->{parent_id}",
-                            "source": src_id,
-                            "target": parent_id,
-                            "kind": "child_of",
-                            "legacy": True,
+                for child in children:
+                    if not isinstance(child, dict):
+                        continue
+                    child_id = child.get("id")
+                    if not child_id or not isinstance(child_id, str):
+                        continue
+                    if child_id not in seen_node_ids or child_id == src_id:
+                        continue
+                    key = (child_id, src_id, "child_of")
+                    if key in seen_edges:
+                        continue
+                    seen_edges.add(key)
+                    edges.append(
+                        {
+                            "data": {
+                                "id": f"e:{child_id}->{src_id}",
+                                "source": child_id,
+                                "target": src_id,
+                                "kind": "child_of",
+                                "legacy": True,
+                            }
                         }
-                    }
-                )
+                    )
 
     # 3) Entity cross-edges — best-effort enrichment from Neo4j. When the
     # graph backend doesn't expose ``get_wiki_graph`` (NullGraphStore,

@@ -207,6 +207,55 @@ class WikiCache:
             upsert=True,
         )
 
+    async def delete_wiki(self, channel_id: str, target_lang: str = "en") -> bool:
+        """Delete the cached wiki document for ``(channel_id, target_lang)``.
+
+        Returns ``True`` if a row was deleted. Does NOT touch the version
+        archive — callers that want to preserve a rollback point must
+        snapshot via ``version_store.archive`` BEFORE calling this. Used
+        by the ``mode=rebuild`` path on POST /wiki/refresh to clear all
+        curation flags (pinned/hidden) + folder structure before a fresh
+        regeneration so the builder runs against a clean slate.
+
+        When ``per_page_wiki`` is enabled, individual page rows live in
+        a separate ``wiki_pages`` collection (and folder→child links in
+        ``wiki_redirects``); a true clean slate also wipes those, otherwise
+        the regeneration runs on top of stale per-page docs and the
+        rebuild's "from scratch" contract is silently violated.
+        """
+        await self._ensure_db()
+        key = _cache_key(channel_id, target_lang)
+        result = await self._collection.delete_one({"channel_id": key})
+        # Backward-compat: when target_lang is the default, the legacy
+        # row may live under the bare ``channel_id`` instead of the
+        # suffixed key. Best-effort delete that too so a rebuild on
+        # default-lang channels actually wipes both rows.
+        if self._is_default_lang(target_lang):
+            await self._collection.delete_one({"channel_id": channel_id})
+
+        # Per-page store wipe — only when the feature flag is on. Wrapped
+        # in try/except because a per-page wipe failure should NOT block
+        # the rebuild (the monolith cache is the source of truth for the
+        # generator; the per-page store is a denormalised mirror that
+        # save_wiki repopulates on the next successful generation).
+        try:
+            if get_settings().per_page_wiki:
+                from beever_atlas.wiki.page_store import WikiPageStore
+
+                page_store = WikiPageStore(db=self._db)
+                await page_store.delete_all_for_channel(
+                    channel_id=channel_id, target_lang=target_lang
+                )
+        except Exception:
+            logger.exception(
+                "WikiCache.delete_wiki: per-page wipe failed channel=%s lang=%s — "
+                "monolith cache deletion still applied",
+                channel_id,
+                target_lang,
+            )
+
+        return result.deleted_count > 0
+
     async def mark_stale(self, channel_id: str, target_lang: str | None = None) -> None:
         await self._ensure_db()
         if target_lang is None:

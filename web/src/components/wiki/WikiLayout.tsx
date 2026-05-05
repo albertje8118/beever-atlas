@@ -50,12 +50,11 @@ interface WikiLayoutProps {
   onVersionHistoryToggle?: () => void;
 }
 
-const MIN_WIDTH = 180;
-const MAX_WIDTH = 400;
-// Bumped from 240 → 270 to give two-line ``line-clamp-2`` titles in
-// WikiSidebar enough room without wrapping awkwardly at indent 1+.
-// Users can still drag-resize via the resize handle.
-const DEFAULT_WIDTH = 270;
+const MIN_WIDTH = 200;
+const MAX_WIDTH = 460;
+// Bumped to 320 so multi-level folder trees + 2-line wrapped titles
+// have enough horizontal room before the resize handle has to be used.
+const DEFAULT_WIDTH = 320;
 const SEARCH_MARK_ATTR = "data-wiki-search-mark";
 
 function clearSearchHighlights(root: HTMLElement | null) {

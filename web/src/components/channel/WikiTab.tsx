@@ -17,7 +17,6 @@ import { useWikiRefresh, type WikiGenerationStatus } from "@/hooks/useWikiRefres
 import { useWikiVersions } from "@/hooks/useWikiVersions";
 import { useWikiVersion } from "@/hooks/useWikiVersion";
 import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
-import { useChannelPolicy } from "@/hooks/useChannelPolicy";
 import { WikiLayout } from "@/components/wiki/WikiLayout";
 import { WikiHealthToolbar } from "@/components/wiki/WikiHealthToolbar";
 import { SegmentedToggle } from "@/components/shared/SegmentedToggle";
@@ -26,6 +25,7 @@ import {
   type ExplainerSection,
 } from "@/components/shared/ViewExplainerButton";
 import { OverviewPage } from "@/components/wiki/OverviewPage";
+import { FolderPage } from "@/components/wiki/FolderPage";
 import { TopicPage } from "@/components/wiki/TopicPage";
 import { GenericPage } from "@/components/wiki/GenericPage";
 import { FaqPage } from "@/components/wiki/FaqPage";
@@ -467,9 +467,23 @@ function renderPage(
   topicPages: WikiPageNode[],
   onNavigate: (pageId: string) => void,
   lang?: string,
+  folderPages: WikiPageNode[] = [],
+  generatedAt?: string,
 ) {
   if (page.id === "overview" || (page.page_type === "fixed" && page.slug === "overview")) {
-    return <OverviewPage page={page} topicPages={topicPages} onNavigate={onNavigate} lang={lang} />;
+    return (
+      <OverviewPage
+        page={page}
+        topicPages={topicPages}
+        folderPages={folderPages}
+        generatedAt={generatedAt}
+        onNavigate={onNavigate}
+        lang={lang}
+      />
+    );
+  }
+  if (page.page_type === "folder") {
+    return <FolderPage page={page} onNavigate={onNavigate} lang={lang} />;
   }
   if (page.page_type === "topic" || page.page_type === "sub-topic") {
     return <TopicPage page={page} onNavigate={onNavigate} lang={lang} />;
@@ -545,11 +559,11 @@ export function WikiTab() {
   const { hasMemories, isLoading: isMemoryCountLoading } = useChannelMemoryCount(channelId);
 
   // Derive manual mode from the effective channel policy.
-  // When maintenance_mode is "auto" the toolbar button is hidden (auto fires on its own).
-  // Default to true (manual) so the button is visible when the policy hasn't loaded yet
-  // or when an older backend returns a policy without the wiki sub-tree.
-  const { policy: channelPolicy } = useChannelPolicy(channelId);
-  const manualMode = channelPolicy?.effective?.wiki?.maintenance_mode !== "auto";
+  // The Maintain Wiki button was removed in the action redesign — the
+  // unified "Update wiki" primary action covers the same flow with
+  // explicit user intent. The maintenance_mode policy is still read
+  // elsewhere (auto-maintainer wiring); this component no longer needs
+  // it directly.
 
   // Version history
   const { data: versions, isLoading: isVersionsLoading, refetch: refetchVersions } = useWikiVersions(channelId);
@@ -577,34 +591,52 @@ export function WikiTab() {
     ((extractionStatus.counts.pending ?? 0) > 0 ||
       (extractionStatus.counts.extracting ?? 0) > 0);
 
-  const handleRefresh = useCallback(() => {
-    triggerRefresh(() => {
-      refetch();
-      refetchVersions();
-    });
-  }, [triggerRefresh, refetch, refetchVersions]);
-
-  // Restructure tree — POSTs ``?restructure=true`` so the backend
-  // forces the structure planner to run on this regenerate even when
-  // ``WIKI_FOLDER_PLANNER`` is OFF. Distinct from the standard
-  // refresh: an opt-in "re-plan the folder hierarchy from scratch"
-  // operator action. Surfaced as a Tools dropdown item.
-  const handleRestructure = useCallback(async () => {
-    if (!channelId) return;
-    try {
-      const langParam = targetLang ? `?target_lang=${encodeURIComponent(targetLang)}&restructure=true` : "?restructure=true";
-      await api.post(`/api/channels/${channelId}/wiki/refresh${langParam}`);
-      // Hand off to the same polling refetch flow the normal refresh uses.
-      triggerRefresh(() => {
+  // ── Three primary wiki actions ─────────────────────────────────────
+  // Backend ``/wiki/refresh`` accepts ``mode={update|reorganize|rebuild}``.
+  // Each handler calls the same pollable refresh flow so the
+  // status/banner/version-history wiring stays uniform.
+  //
+  //   handleUpdate    → mode=update    — incremental refresh, keep folders
+  //   handleReorganize→ mode=reorganize— refresh + re-plan folder boundaries
+  //   handleRebuild   → mode=rebuild   — snapshot to history, wipe, regen
+  const handleUpdate = useCallback(() => {
+    triggerRefresh(
+      () => {
         refetch();
         refetchVersions();
-      });
-    } catch (err) {
-      // Non-fatal: log so an operator can debug, but don't break the UI.
-      // eslint-disable-next-line no-console
-      console.error("restructure_tree_failed", err);
-    }
-  }, [channelId, targetLang, triggerRefresh, refetch, refetchVersions]);
+      },
+      undefined,
+      "update",
+    );
+  }, [triggerRefresh, refetch, refetchVersions]);
+
+  const handleReorganize = useCallback(() => {
+    triggerRefresh(
+      () => {
+        refetch();
+        refetchVersions();
+      },
+      undefined,
+      "reorganize",
+    );
+  }, [triggerRefresh, refetch, refetchVersions]);
+
+  const handleRebuild = useCallback(() => {
+    triggerRefresh(
+      () => {
+        refetch();
+        refetchVersions();
+      },
+      undefined,
+      "rebuild",
+    );
+  }, [triggerRefresh, refetch, refetchVersions]);
+
+  // Backwards-compat alias — the WikiLayout still wires `onRefresh`
+  // and the Sidebar header still calls handleRefresh as the primary
+  // action. Update is the new primary, so route the legacy callsite
+  // there.
+  const handleRefresh = handleUpdate;
 
   const handleRegenerateInLang = useCallback((lang: string) => {
     // Switch displayed language AND force a regeneration in that language.
@@ -666,9 +698,28 @@ export function WikiTab() {
     triggerRefresh, refetch, refetchVersions,
   ]);
 
-  const handleNavigate = useCallback((pageId: string) => {
-    setActivePageId(pageId);
-  }, []);
+  // Accepts either a page-id (e.g. "topic-auth", "folder-foo") OR a
+  // raw slug (e.g. "topic-auth" without prefix, as the LLM emits in
+  // See Also / Related / children TOC links). Resolves slugs by
+  // walking the structure tree; falls back to the input if no node
+  // matches so deep-link routes still work.
+  const handleNavigate = useCallback(
+    (pageIdOrSlug: string) => {
+      if (!pageIdOrSlug) return;
+      const pages = wiki?.structure?.pages ?? [];
+      const walk = (nodes: WikiPageNode[]): WikiPageNode | null => {
+        for (const n of nodes) {
+          if (n.id === pageIdOrSlug || n.slug === pageIdOrSlug) return n;
+          const inChild = walk(n.children ?? []);
+          if (inChild) return inChild;
+        }
+        return null;
+      };
+      const node = walk(pages);
+      setActivePageId(node ? node.id : pageIdOrSlug);
+    },
+    [wiki?.structure?.pages],
+  );
 
   const handleSelectVersion = useCallback((versionNumber: number) => {
     setViewingVersionNumber(versionNumber);
@@ -712,12 +763,39 @@ export function WikiTab() {
     viewingVersionNumber !== null && versionData !== null
       ? versionData.structure
       : wiki?.structure;
-  const topicPages = useMemo(
+  // Flatten the structure tree to collect EVERY topic page,
+  // regardless of folder nesting. Before this, the Overview's topic
+  // grid only showed root-level topics — when most topics live
+  // inside folders (the planner's normal output), the grid showed
+  // only the 2-3 loose orphans which felt broken to the user. Now
+  // the grid is the canonical "all topics" view; folder cards still
+  // give grouped navigation above.
+  const topicPages = useMemo(() => {
+    const collect = (
+      nodes: WikiPageNode[] | undefined,
+      out: WikiPageNode[],
+    ): WikiPageNode[] => {
+      for (const n of nodes ?? []) {
+        if (n.page_type === "topic") out.push(n);
+        if (n.children && n.children.length > 0) collect(n.children, out);
+      }
+      return out;
+    };
+    return collect(_structureForTopicPages?.pages, []);
+  }, [_structureForTopicPages]);
+  // Folder pages — surfaced on the Overview as a dedicated cards
+  // section so the planner-produced grouping is visible at the entry
+  // point, not just in the sidebar tree.
+  const folderPages = useMemo(
     () =>
-      _structureForTopicPages?.pages.filter((p) => p.page_type === "topic") ??
+      _structureForTopicPages?.pages.filter((p) => p.page_type === "folder") ??
       [],
     [_structureForTopicPages],
   );
+  const overviewGeneratedAt =
+    viewingVersionNumber !== null && versionData !== null
+      ? versionData.generated_at
+      : wiki?.generated_at;
 
   // Graph view = full-width canvas, NO wiki sidebar. The pages-list
   // sidebar is irrelevant when the operator is in graph mode and only
@@ -895,7 +973,14 @@ export function WikiTab() {
     // 100→60→100 flash even when the lastKeyRef guard correctly skipped
     // the data swap. The guard already prevents content tearing, so the
     // wrapper is pure noise. Render the page directly.
-    pageContent = renderPage(activePage, topicPages, handleNavigate, displayedLang);
+    pageContent = renderPage(
+      activePage,
+      topicPages,
+      handleNavigate,
+      displayedLang,
+      folderPages,
+      overviewGeneratedAt,
+    );
   }
 
   return (
@@ -935,13 +1020,12 @@ export function WikiTab() {
       headerExtra={
         <WikiHealthToolbar
           channelId={channelId!}
-          manualMode={manualMode}
           onDownload={handleDownload}
           onHistoryToggle={() => setVersionHistoryOpen((v) => !v)}
           historyOpen={versionHistoryOpen}
           versionCount={wiki?.version_count ?? 0}
-          onRegenerate={handleRefresh}
-          onRestructure={handleRestructure}
+          onReorganize={handleReorganize}
+          onRebuild={handleRebuild}
           isRegenerating={isRefreshing}
         />
       }

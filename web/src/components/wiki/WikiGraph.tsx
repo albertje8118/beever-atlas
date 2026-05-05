@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LayoutKey = "fcose" | "cose" | "dagre" | "grid";
-type KindFilter = "all" | "topic" | "entity" | "decisions" | "faq" | "action_items";
+type KindFilter = "all" | "folder" | "topic" | "entity" | "decisions" | "faq" | "action_items";
 type WindowFilter = "all" | "1h" | "24h" | "7d";
 
 interface FilterState {
@@ -59,6 +59,9 @@ const KIND_META: Record<
   channel:          { color: "#a855f7", ribbon: "#a855f7", label: "Hub" },
   wiki_overview:    { color: "#0ea5e9", ribbon: "#0ea5e9", label: "Overview" },
   wiki_fixed:       { color: "#22c55e", ribbon: "#22c55e", label: "Fixed" },
+  // Folder pages — distinct amber tone + larger node so the planner-
+  // produced groupings read as containers, not as just-another-topic.
+  wiki_folder:      { color: "#f59e0b", ribbon: "#f59e0b", label: "Folder" },
   wiki_topic:       { color: "#3b82f6", ribbon: "#3b82f6", label: "Topic" },
   wiki_subtopic:    { color: "#38bdf8", ribbon: "#38bdf8", label: "Sub-topic" },
   wiki_entity_page: { color: "#f59e0b", ribbon: "#f59e0b", label: "Entity page" },
@@ -76,6 +79,7 @@ function kindKeyForNode(node: WikiGraphNode): string {
   const slug = (d as Record<string, unknown>).slug as string | undefined;
   const pk = d.page_kind || "topic";
   if (slug === "overview") return "wiki_overview";
+  if (pk === "folder") return "wiki_folder";
   if (pk === "fixed") return "wiki_fixed";
   if (pk === "sub-topic") return "wiki_subtopic";
   if (pk === "entity") return "wiki_entity_page";
@@ -140,6 +144,7 @@ function applyFilters(
     if (filters.kind === "all") return true;
     if (filters.kind === "entity") return n.data.kind === "entity";
     if (n.data.kind !== "wiki") return false;
+    if (filters.kind === "folder") return n.data.page_kind === "folder";
     return n.data.page_kind === filters.kind;
   });
 
@@ -221,24 +226,75 @@ const HUB_ICON_SVG = encodeURIComponent(
 );
 const HUB_ICON_URL = `data:image/svg+xml;utf8,${HUB_ICON_SVG}`;
 
+// Folder icon — same visual language as the hub but slimmer fold-line
+// so the eye distinguishes "Hub" (the channel root) from "Folder"
+// (a planner-produced grouping under it).
+const FOLDER_ICON_SVG = encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
+    '<path d="M3.4 7.6 a1.6 1.6 0 0 1 1.6 -1.6 h4.4 l1.6 1.6 h9.4 a1.6 1.6 0 0 1 1.6 1.6 V18.4 a1.6 1.6 0 0 1 -1.6 1.6 H5 a1.6 1.6 0 0 1 -1.6 -1.6 z" ' +
+    'fill="rgba(255,255,255,0.96)"/>' +
+    '<path d="M3.4 9.6 H20.4" stroke="rgba(15,23,42,0.16)" stroke-width="0.6"/>' +
+    '</svg>',
+);
+const FOLDER_ICON_URL = `data:image/svg+xml;utf8,${FOLDER_ICON_SVG}`;
+
 // ─── Element builder ──────────────────────────────────────────────────────────
 
 function buildElements(filtered: WikiGraphPayload): unknown[] {
   const out: unknown[] = [];
+  // Folder cluster index: every page (folder OR topic) inside a folder
+  // shares the folder's id as its fcose cluster key, so children pull
+  // toward their parent folder rather than the channel hub. Folder→
+  // folder nesting walks up to the topmost folder ancestor for grouping.
+  // Built from `child_of` edges (source=child, target=parent) since the
+  // backend doesn't carry parent_id on the node data itself.
+  const parentById = new Map<string, string>();
+  const isFolderById = new Map<string, boolean>();
+  for (const node of filtered.nodes) {
+    const d = node.data as Record<string, unknown>;
+    const id = String(d.id ?? "");
+    if (!id) continue;
+    isFolderById.set(id, d.page_kind === "folder");
+  }
+  for (const edge of filtered.edges) {
+    const ed = edge.data;
+    if (ed.kind === "child_of" && ed.source && ed.target) {
+      parentById.set(String(ed.source), String(ed.target));
+    }
+  }
+  const rootFolderFor = (id: string): string | null => {
+    let cur: string | null = id;
+    let lastFolder: string | null = isFolderById.get(id) ? id : null;
+    let hops = 0;
+    while (cur && hops < 16) {
+      const next = parentById.get(cur);
+      if (!next) break;
+      if (isFolderById.get(next)) lastFolder = next;
+      cur = next;
+      hops += 1;
+    }
+    return lastFolder;
+  };
+
   for (const node of filtered.nodes) {
     const isChannel = node.data.kind === "channel";
     const isEntity = node.data.kind === "entity";
     const isWiki = node.data.kind === "wiki";
+    const isFolder = isWiki && (node.data as Record<string, unknown>).page_kind === "folder";
     const kindKey = kindKeyForNode(node);
     const color = colorForNode(node);
-    // Cluster membership: fcose needs a string cluster id per node.
-    // Channel hub gets its own cluster; wiki nodes cluster by kind.
-    // Entity nodes cluster together.
+    // Cluster membership: prefer folder-ancestry clustering for wiki
+    // pages so children visibly orbit their folder. Fall back to
+    // by-kind clustering for loose pages so they still group.
+    const nodeId = String((node.data as Record<string, unknown>).id ?? "");
+    const folderRoot = isWiki ? rootFolderFor(nodeId) : null;
     const clusterKey = isChannel
       ? "cluster_hub"
       : isEntity
         ? "cluster_entity"
-        : `cluster_${kindKey}`;
+        : folderRoot
+          ? `cluster_folder_${folderRoot}`
+          : `cluster_${kindKey}`;
 
     out.push({
       data: {
@@ -249,21 +305,21 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
         glowColor: `rgb(${hexToRgbCsv(color)})`,
         kindKey,
         clusterKey,
-        // Dimensions: bigger cards so titles are readable.
-        // Rounded-square nodes with centered icon + caption-below.
-        // (User-preferred design after testing chip pills + circles.)
-        // Equal width=height so the icon centers cleanly via
-        // background-position 50%/50%. Round-rectangle with high
-        // corner-radius gives the modern soft-square look, distinct
-        // from the entity-graph circles.
+        // Folders get bigger nodes (60×60) than topics (52×52) so
+        // they read as "container" at a glance.
         nodeShape: isEntity ? "ellipse" : "round-rectangle",
-        nodeWidth: isChannel ? 64 : isWiki ? 52 : 14,
-        nodeHeight: isChannel ? 64 : isWiki ? 52 : 14,
-        // Cytoscape's ``background-image`` requires a valid URL or the
-        // literal "none" — empty strings crash the style parser.
-        icon: isChannel ? HUB_ICON_URL : isWiki ? PAGE_ICON_URL : "none",
-        labelSize: isChannel ? 13 : isWiki ? 12 : 9,
-        labelWeight: isChannel ? 700 : 500,
+        nodeWidth: isChannel ? 64 : isFolder ? 60 : isWiki ? 52 : 14,
+        nodeHeight: isChannel ? 64 : isFolder ? 60 : isWiki ? 52 : 14,
+        // Folder pages get the folder glyph; everything else page glyph.
+        icon: isChannel
+          ? HUB_ICON_URL
+          : isFolder
+            ? FOLDER_ICON_URL
+            : isWiki
+              ? PAGE_ICON_URL
+              : "none",
+        labelSize: isChannel ? 13 : isFolder ? 13 : isWiki ? 12 : 9,
+        labelWeight: isChannel || isFolder ? 700 : 500,
       },
     });
   }
@@ -578,6 +634,20 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               style: {
                 "border-width": 1,
                 "border-color": "rgba(255,255,255,0.18)",
+              },
+            },
+            // ── Folder pages ─────────────────────────────────────────────
+            // Distinct amber tint, thicker border so the eye reads them
+            // as containers (not just-another-topic). The amber-ringed
+            // soft-square mirrors the sidebar Folder icon.
+            {
+              selector: "node[page_kind = 'folder']",
+              style: {
+                "border-width": 2.5,
+                "border-color": "rgba(251,191,36,0.7)",
+                "shadow-blur": 24,
+                "shadow-color": "#f59e0b",
+                "shadow-opacity": 0.55,
               },
             },
             // ── Channel hub ───────────────────────────────────────────────
@@ -1093,6 +1163,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
       if (n.data.kind === "entity") kinds.add("entity");
       else if (n.data.kind === "wiki") {
         const pk = n.data.page_kind;
+        if (pk === "folder") kinds.add("folder");
         if (pk === "topic") kinds.add("topic");
         if (pk === "decisions") kinds.add("decisions");
         if (pk === "faq") kinds.add("faq");
@@ -1249,18 +1320,20 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                     data-testid="wiki-graph-filter-kind"
                   >
                     <option value="all">All kinds</option>
+                    <option value="folder">Folder</option>
                     <option value="topic">Topic</option>
                     <option value="entity">Entity</option>
                     <option value="decisions">Decisions</option>
                     <option value="faq">FAQ</option>
                     <option value="action_items">Action items</option>
                   </select>
-                  {(["all", "topic", "entity", "decisions", "faq", "action_items"] as KindFilter[])
+                  {(["all", "folder", "topic", "entity", "decisions", "faq", "action_items"] as KindFilter[])
                     .filter((k) => k === "all" || availableKinds.includes(k))
                     .map((k) => {
                       const active = filters.kind === k;
                       const kindColorMap: Record<string, string> = {
                         all: "#94a3b8",
+                        folder: KIND_META.wiki_folder.color,
                         topic: KIND_META.wiki_topic.color,
                         entity: KIND_META.entity.color,
                         decisions: KIND_META.wiki_decisions.color,
@@ -1269,6 +1342,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                       };
                       const kindLabelMap: Record<string, string> = {
                         all: "All kinds",
+                        folder: "Folders",
                         topic: "Topics",
                         entity: "Entities",
                         decisions: "Decisions",
@@ -1366,7 +1440,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                     const active = layout === l;
                     const labelMap: Record<LayoutKey, string> = {
                       fcose: "Clusters",
-                      dagre: "Top-down",
+                      dagre: "Folder tree",
                       cose: "Force",
                       grid: "Grid",
                     };
@@ -1453,6 +1527,7 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
 function Legend() {
   const items: Array<{ color: string; label: string }> = [
     { color: KIND_META.channel.color, label: "Hub" },
+    { color: KIND_META.wiki_folder.color, label: "Folder" },
     { color: KIND_META.wiki_overview.color, label: "Overview" },
     { color: KIND_META.wiki_topic.color, label: "Topic" },
     { color: KIND_META.wiki_subtopic.color, label: "Sub-topic" },

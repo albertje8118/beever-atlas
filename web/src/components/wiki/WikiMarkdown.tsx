@@ -323,7 +323,7 @@ function WikiPdfLink({ href, title }: { href: string; title: string }) {
 export function WikiMarkdown({
   content,
   citations = [],
-  onNavigate: _onNavigate,
+  onNavigate,
   crossLinks = {},
   crossLinksBroken = [],
 }: WikiMarkdownProps) {
@@ -435,7 +435,91 @@ export function WikiMarkdown({
         a({ href, children }) {
           if (!href) return <span>{children}</span>;
           const text = String(children);
+
+          // Internal wiki link — `[Title](/wiki/<slug>)`. The LLM
+          // emits these in See Also / Related / children TOC sections
+          // and the legacy renderer treats them as external (opens
+          // in a new tab → 404 since the route is SPA-handled).
+          // Intercept and route through `onNavigate` with the slug
+          // so the click stays in-app and lands on the right page.
+          if (href.startsWith("/wiki/")) {
+            const slug = href.slice("/wiki/".length).split(/[/?#]/)[0];
+            return (
+              <a
+                href={href}
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (slug && onNavigate) onNavigate(slug);
+                }}
+                className="text-primary hover:underline font-medium"
+              >
+                {children}
+              </a>
+            );
+          }
+
           const mediaType = detectMediaType(href, text);
+
+          // Image-typed links — when the LLM emits ``[Title](image_url)``
+          // instead of ``![alt](image_url)`` (a routine mistake on
+          // chat-platform attachments), render as an actual image
+          // preview via WikiImage. The proxied/public URL routing
+          // inside WikiImage handles Mattermost/Slack file URLs that
+          // need the loader-token signing path.
+          if (mediaType === "image") {
+            return <WikiImage rawUrl={href} alt={text || "Image"} />;
+          }
+
+          // Video-typed links — render as an inline embed so the user
+          // can play without leaving the wiki. YouTube + Vimeo
+          // transform to embed iframes; direct .mp4/.webm get a
+          // native <video> element.
+          if (mediaType === "video") {
+            const lower = href.toLowerCase();
+            const ytMatch = lower.match(/[?&]v=([\w-]+)/) || lower.match(/youtu\.be\/([\w-]+)/);
+            const vimeoMatch = lower.match(/vimeo\.com\/(\d+)/);
+            if (ytMatch) {
+              return (
+                <div className="relative w-full my-3 rounded-lg overflow-hidden border border-border bg-muted/20" style={{ paddingBottom: "56.25%" }}>
+                  <iframe
+                    src={`https://www.youtube.com/embed/${ytMatch[1]}`}
+                    title={text || "Embedded video"}
+                    loading="lazy"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                    className="absolute inset-0 w-full h-full border-0"
+                  />
+                </div>
+              );
+            }
+            if (vimeoMatch) {
+              return (
+                <div className="relative w-full my-3 rounded-lg overflow-hidden border border-border bg-muted/20" style={{ paddingBottom: "56.25%" }}>
+                  <iframe
+                    src={`https://player.vimeo.com/video/${vimeoMatch[1]}`}
+                    title={text || "Embedded video"}
+                    loading="lazy"
+                    allow="autoplay; fullscreen; picture-in-picture"
+                    allowFullScreen
+                    className="absolute inset-0 w-full h-full border-0"
+                  />
+                </div>
+              );
+            }
+            // Direct .mp4/.webm — native video element
+            if (/\.(mp4|webm)(\?|$)/.test(lower)) {
+              return (
+                <video
+                  src={href}
+                  controls
+                  preload="metadata"
+                  aria-label={text || "Video"}
+                  className="w-full h-auto my-3 rounded-lg border border-border bg-muted/20"
+                />
+              );
+            }
+            // Fall through to generic link card if we can't embed.
+          }
 
           // PDF links — show expandable card
           if (mediaType === "pdf" || text.startsWith("📄")) {

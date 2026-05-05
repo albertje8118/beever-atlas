@@ -1,0 +1,321 @@
+"""Module planning support — pure functions over topic data.
+
+Provides the building blocks the orchestrator uses to decide which
+modules to render:
+
+  - ``compute_signals``   — pure aggregation of cluster facts /
+    decisions / entities / media into the dict the orchestrator
+    feeds to the LLM and the validator.
+  - ``ModulePlan`` / ``ModulePin`` — typed container for the output
+    of validation.
+  - ``_validate_plan`` — drops modules whose eligibility predicate
+    fails (defensive against the LLM picking modules whose data
+    shape doesn't fit) and dedups anchor names.
+  - ``_HUMAN_RULES`` — human-readable per-module selection criteria
+    rendered into the LLM prompt.
+
+This module deliberately does NOT make any LLM calls itself. The
+orchestrator runs ONE unified LLM call (planner + writer in a single
+prompt) — see ``orchestrator.compile_topic_page_modular``.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from beever_atlas.wiki.modules import MODULE_CATALOG, is_known_module
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ModulePin:
+    """A media item placement: ties a media id to a fact id at a slot."""
+
+    media_id: str
+    fact_id: str
+    slot: str  # "hero" | "inline" | "gallery"
+
+
+@dataclass
+class ModulePlan:
+    """The validated planning output — ordered modules + media pins."""
+
+    modules: list[dict[str, Any]] = field(default_factory=list)
+    media_pins: list[ModulePin] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.modules
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "modules": list(self.modules),
+            "media_pins": [
+                {"media_id": p.media_id, "fact_id": p.fact_id, "slot": p.slot}
+                for p in self.media_pins
+            ],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Signal computation
+# ---------------------------------------------------------------------------
+
+
+def compute_signals(
+    *,
+    cluster: dict[str, Any],
+    decisions: list[dict] | None = None,
+    entities: list[dict] | None = None,
+    relationships: list[dict] | None = None,
+    media: list[dict] | None = None,
+    related_topics: list[dict] | None = None,
+    open_questions: list[dict] | None = None,
+    process_steps: list[dict] | None = None,
+    alternatives: list[str] | None = None,
+    pros_cons_confidence: float = 0.0,
+) -> dict[str, Any]:
+    """Aggregate cluster signals the planner consults.
+
+    Each signal mirrors a field one or more catalog predicates check.
+    Centralising aggregation here keeps the planner prompt + the
+    validator + the catalog predicates reading from the same source
+    of truth — divergence between "what the LLM was told" and "what
+    the validator checks" was the most likely failure mode.
+    """
+    facts = cluster.get("member_facts") or cluster.get("facts") or []
+    fact_count = len(facts) if isinstance(facts, list) else 0
+
+    decisions = decisions or []
+    entities = entities or []
+    relationships = relationships or []
+    media = media or []
+    related_topics = related_topics or []
+    open_questions = open_questions or []
+    process_steps = process_steps or []
+    alternatives = alternatives or []
+
+    # Event span — the spread (in days) between earliest and latest
+    # event-typed facts. ``timeline`` module needs both ≥4 events AND
+    # ≥14 days of spread.
+    event_facts = [
+        f for f in facts
+        if isinstance(f, dict) and (f.get("fact_type") or "").lower() in {"event", "action", "decision"}
+    ]
+    event_count = len(event_facts)
+    dates = sorted(
+        [str(f.get("date") or "")[:10] for f in event_facts if f.get("date")]
+    )
+    if len(dates) >= 2:
+        try:
+            from datetime import date
+
+            d0 = date.fromisoformat(dates[0])
+            d1 = date.fromisoformat(dates[-1])
+            event_span_days = (d1 - d0).days
+        except (ValueError, TypeError):
+            event_span_days = 0
+    else:
+        event_span_days = 0
+
+    # Strong-claim authors — distinct authors making opinion / decision
+    # / claim-typed facts. Surface for ``quote_highlights`` eligibility.
+    strong_claim_types = {"opinion", "claim", "decision", "recommendation"}
+    strong_claim_authors = {
+        (f.get("author_name") or f.get("user_name") or "")
+        for f in facts
+        if isinstance(f, dict) and (f.get("fact_type") or "").lower() in strong_claim_types
+    }
+    strong_claim_authors.discard("")
+
+    # Media bucketing — what media is hero-eligible vs inline vs gallery vs
+    # link/pdf/video. Computed once here so the planner doesn't have to
+    # rederive types from raw media records.
+    media_by_kind = {
+        "hero_candidate": [],
+        "inline": [],
+        "gallery": [],
+        "link": [],
+        "pdf": [],
+        "video": [],
+    }
+    title_lower = (cluster.get("title") or "").lower()
+    for m in media:
+        if not isinstance(m, dict):
+            continue
+        kind = (m.get("kind") or m.get("type") or "").lower()
+        url = (m.get("url") or "").lower()
+        ref_count = int(m.get("referencing_fact_count", 0))
+        alt = (m.get("alt") or m.get("title") or "").lower()
+        # Hero candidate: explicit ``is_hero=True`` flag wins (gives the
+        # gather step a manual override), OR heuristic — alt overlaps
+        # title AND ≥3 facts reference it. The heuristic is loose
+        # (substring overlap or shared word with ≥4 chars) so common
+        # paraphrases between title and alt still match.
+        is_hero_explicit = bool(m.get("is_hero"))
+        title_words = {w for w in title_lower.split() if len(w) >= 4}
+        alt_words = {w for w in alt.split() if len(w) >= 4}
+        shared_words = title_words & alt_words
+        heuristic_hero = bool(
+            alt
+            and title_lower
+            and (
+                alt in title_lower
+                or title_lower in alt
+                or len(shared_words) >= 2
+            )
+            and ref_count >= 3
+        )
+        if is_hero_explicit or heuristic_hero:
+            media_by_kind["hero_candidate"].append(m)
+            continue
+        # Type buckets.
+        if kind in {"image", "screenshot"} or url.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            if m.get("source_fact_id"):
+                media_by_kind["inline"].append(m)
+            else:
+                media_by_kind["gallery"].append(m)
+        elif kind == "video" or "youtube.com" in url or "vimeo.com" in url or url.endswith((".mp4", ".webm")):
+            media_by_kind["video"].append(m)
+        elif kind == "pdf" or url.endswith(".pdf"):
+            media_by_kind["pdf"].append(m)
+        elif kind == "link" or url.startswith("http"):
+            media_by_kind["link"].append(m)
+
+    return {
+        "title": cluster.get("title") or "",
+        "fact_count": fact_count,
+        "decision_count": len(decisions),
+        "event_count": event_count,
+        "event_span_days": event_span_days,
+        "alternative_count": len(alternatives),
+        "pros_cons_confidence": float(pros_cons_confidence),
+        "strong_claim_author_count": len(strong_claim_authors),
+        "process_step_count": len(process_steps),
+        "entity_count": len(entities),
+        "entity_edge_count": len(relationships),
+        "open_question_count": len(open_questions),
+        "child_count": int(cluster.get("child_count", 0)),
+        "related_topics": related_topics,
+        "has_media_hero_candidate": bool(media_by_kind["hero_candidate"]),
+        "inline_media_count": len(media_by_kind["inline"]),
+        "gallery_media_count": len(media_by_kind["gallery"]),
+        "link_media_count": len(media_by_kind["link"]),
+        "pdf_media_count": len(media_by_kind["pdf"]),
+        "video_media_count": len(media_by_kind["video"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Validator — drops modules whose eligibility predicate fails or whose
+# ID is unknown. Logs each rejection so soak telemetry can spot
+# persistently-bad picks per module type.
+# ---------------------------------------------------------------------------
+
+
+def _validate_plan(
+    raw_plan: dict[str, Any],
+    signals: dict[str, Any],
+) -> ModulePlan:
+    """Validate the LLM's plan output against catalog eligibility.
+
+    Returns a ``ModulePlan`` containing only the modules whose
+    eligibility predicate passes. Logs each rejection so soak
+    telemetry can spot persistently-bad picks per module type.
+    """
+    modules_in = raw_plan.get("modules") or []
+    if not isinstance(modules_in, list):
+        modules_in = []
+
+    plan = ModulePlan()
+    seen_anchors: set[str] = set()
+    for entry in modules_in:
+        if not isinstance(entry, dict):
+            continue
+        mid = str(entry.get("id") or "").strip()
+        anchor = str(entry.get("anchor") or "").strip()
+        if not mid:
+            continue
+        if not is_known_module(mid):
+            logger.warning(
+                "module_rejected reason=unknown_id module=%s",
+                mid,
+            )
+            continue
+        spec = MODULE_CATALOG[mid]
+        try:
+            eligible = bool(spec.eligible(signals))
+        except Exception as exc:  # noqa: BLE001 — predicate must never block
+            logger.warning(
+                "module_rejected reason=predicate_error module=%s exc=%s",
+                mid, exc,
+            )
+            continue
+        if not eligible:
+            logger.info(
+                "module_rejected reason=criteria_unmet module=%s",
+                mid,
+            )
+            continue
+        # Dedup anchor (orchestrator assumes anchors are unique).
+        if not anchor:
+            anchor = mid.replace("_", "-")
+        candidate = anchor
+        suffix = 2
+        while candidate in seen_anchors:
+            candidate = f"{anchor}-{suffix}"
+            suffix += 1
+        seen_anchors.add(candidate)
+        plan.modules.append({"id": mid, "anchor": candidate})
+
+    # Media pins — preserve the planner's pinning, but only include
+    # pins whose slot is recognised. The frontend renderers handle
+    # missing/invalid media ids gracefully.
+    pins_in = raw_plan.get("media_pins") or []
+    if isinstance(pins_in, list):
+        for p in pins_in:
+            if not isinstance(p, dict):
+                continue
+            slot = str(p.get("slot") or "").strip().lower()
+            if slot not in {"hero", "inline", "gallery"}:
+                continue
+            media_id = str(p.get("media_id") or "").strip()
+            fact_id = str(p.get("fact_id") or "").strip()
+            if not media_id:
+                continue
+            plan.media_pins.append(
+                ModulePin(media_id=media_id, fact_id=fact_id, slot=slot)
+            )
+
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Per-module human-readable rules — rendered into the unified prompt's
+# vocabulary block so the LLM knows the eligibility criteria. Kept in
+# sync with the catalog predicates by hand. The
+# ``test_human_rules_cover_every_catalog_entry`` regression test
+# enforces 1:1 coverage.
+# ---------------------------------------------------------------------------
+
+_HUMAN_RULES: dict[str, str] = {
+    "key_facts": "Pick when fact_count ≥ 5.",
+    "decision_log": "Pick when decision_count ≥ 1.",
+    "timeline": "Pick when event_count ≥ 4 AND event_span_days ≥ 14.",
+    "comparison_matrix": "Pick when alternative_count ≥ 2.",
+    "pros_cons": "Pick when pros_cons_confidence ≥ 0.7 (you set this; ≥ 0.7 = explicit trade-off discussion).",
+    "quote_highlights": "Pick when strong_claim_author_count ≥ 3.",
+    "flow_chart": "Pick when process_step_count ≥ 4.",
+    "entity_diagram": "Pick when entity_count ≥ 3 AND entity_edge_count ≥ 5.",
+    "open_questions": "Pick when open_question_count ≥ 1.",
+    "subpage_cards": "Pick when child_count ≥ 1 (only on parent topics that own sub-pages).",
+    "related_threads": "Pick when at least one related topic has score ≥ 0.4.",
+    "media_hero": "Pick when has_media_hero_candidate is true. AT MOST ONE per page.",
+    "media_inline": "Pick when inline_media_count ≥ 1. Place each marker adjacent to the paragraph mentioning the source fact.",
+    "media_gallery": "Pick when gallery_media_count ≥ 3 (after subtracting hero + inline pins).",
+    "link_card": "Pick when link_media_count ≥ 1.",
+    "pdf_preview": "Pick when pdf_media_count ≥ 1.",
+    "video_embed": "Pick when video_media_count ≥ 1.",
+}

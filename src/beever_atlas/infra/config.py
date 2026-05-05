@@ -524,11 +524,14 @@ class Settings(BaseSettings):
 
     # ``llm-wiki-folder-structure`` Phase B+ — enables the structure
     # planner pass that decides folder boundaries between gather and
-    # compile. Default OFF so existing installs see today's flat
-    # structure until they explicitly opt in. When ON, the planner
-    # runs on full regenerate (and on the new ``?restructure=true``
-    # query). Maintain runs never invoke the planner.
-    wiki_folder_planner: bool = Field(default=False, alias="WIKI_FOLDER_PLANNER")
+    # compile. Default ON so the wiki tree always groups topics into
+    # navigable folders rather than degenerating to a flat 50-item
+    # sidebar after a regular Update. The planner is skipped automatically
+    # for sparse channels via ``wiki_min_topics_for_folders``, and the
+    # ``?mode=reorganize`` query still forces a re-plan from scratch
+    # regardless of this flag. Set ``WIKI_FOLDER_PLANNER=false`` to
+    # restore the legacy flat behaviour.
+    wiki_folder_planner: bool = Field(default=True, alias="WIKI_FOLDER_PLANNER")
 
     # Below this many topic clusters the planner skips folder creation
     # entirely — sparse channels read better as a flat list, and the

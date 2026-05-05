@@ -14,24 +14,16 @@ import {
   PinOff,
   RefreshCw,
   Scissors,
-  Sparkles,
   Combine,
   Wrench,
   X,
   ListX,
 } from "lucide-react";
 import { useWikiLint } from "@/hooks/useWikiLint";
-import { useWikiMaintain } from "@/hooks/useWikiMaintain";
 import { FailedBatchPanel } from "@/components/wiki/FailedBatchPanel";
 
 interface Props {
   channelId: string;
-  /**
-   * When true, the maintainer is in manual mode and the user is responsible
-   * for clicking "Maintain Wiki" to drain dirty pages. When false, the
-   * maintainer auto-fires and the button is hidden.
-   */
-  manualMode?: boolean;
   /** Called when the user clicks "Download" from the Tools menu. */
   onDownload?: () => void;
   /** Called when the user clicks "History" from the Tools menu. */
@@ -40,13 +32,13 @@ interface Props {
   historyOpen?: boolean;
   /** Number of stored versions — shown as a badge on the History item. */
   versionCount?: number;
-  /** Called when the user clicks "Regenerate from scratch" from the Tools menu. */
-  onRegenerate?: () => void;
-  /** Called when the user clicks "Restructure tree" — re-plans the wiki's
-   *  folder structure from scratch. Distinct from Regenerate (which
-   *  rebuilds every page). Shipped as part of the
-   *  llm-wiki-folder-structure change. */
-  onRestructure?: () => void;
+  /** Re-plan folder boundaries (calls POST /wiki/refresh?mode=reorganize).
+   *  Page contents may also refresh. */
+  onReorganize?: () => void;
+  /** Snapshot the current wiki to history then rebuild from scratch
+   *  (calls POST /wiki/refresh?mode=rebuild). Destructive — UI shows
+   *  a confirm step before firing. */
+  onRebuild?: () => void;
   /** Whether a regeneration is currently running. */
   isRegenerating?: boolean;
   /** Number of failed extractions — Failures item is hidden when 0. */
@@ -82,33 +74,42 @@ const TOOL_BTN =
   "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium transition-colors hover:bg-muted text-foreground";
 
 // Two-line tool item: short title on top, one-line description under.
-// Used for Maintain Wiki and Lint Wiki — operations whose names alone
-// don't tell the operator what they do.
+// Used for Health check and Reorganize folders — operations whose
+// names alone don't tell the operator what they do.
 const TOOL_BTN_DESCRIBED =
   "flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted text-foreground";
 
 /**
- * Wiki health toolbar — primary action + collapsible Tools menu.
+ * Wiki tools menu — passive utilities + destructive actions.
  *
- * Layout:
- *   [Maintain Wiki (N)]  — only when manualMode is true
- *   [Tools ▾]            — always; opens a dropdown with:
- *       🩹 Lint Wiki
- *       🕘 History
- *       📥 Download
- *       ─────────────
- *       🔧 Failures (N)  — only when failureCount > 0
- *       🔄 Regenerate from scratch  — danger, shows confirm modal
+ * The three primary wiki actions (Update / Reorganize / Rebuild) live
+ * in the footer's "Update wiki" button, NOT here. This wrench-icon
+ * menu is for read-only utilities + the Rebuild escape hatch.
+ *
+ * Layout (wrench icon → portal'd menu):
+ *   ✅ Health check          — runs lint scan, opens findings panel
+ *   🌳 Reorganize folders    — re-plan folder boundaries
+ *   ─────────────
+ *   🕘 History (N)
+ *   📥 Download
+ *   🔗 Graph
+ *   ─────────────
+ *   📌 Pin / Unpin           — only when activeSlug is set
+ *   👁  Hide / Show          — only when activeSlug is set
+ *   ✂  Split…                — only when activeSlug is set
+ *   ⊕  Merge…                — only when activeSlug is set
+ *   ─────────────
+ *   ✕ Failures (N)           — only when failureCount > 0
+ *   ⚠ Rebuild from scratch   — danger, shows confirm prompt
  */
 export function WikiHealthToolbar({
   channelId,
-  manualMode = true,
   onDownload,
   onHistoryToggle,
   historyOpen = false,
   versionCount = 0,
-  onRegenerate,
-  onRestructure,
+  onReorganize,
+  onRebuild,
   isRegenerating = false,
   failureCount,
   activeSlug,
@@ -120,7 +121,6 @@ export function WikiHealthToolbar({
   onMerge,
 }: Props) {
   const lint = useWikiLint(channelId);
-  const maintain = useWikiMaintain(channelId);
   const navigate = useNavigate();
   const [reportOpen, setReportOpen] = useState(false);
   const [failuresOpen, setFailuresOpen] = useState(false);
@@ -258,49 +258,12 @@ export function WikiHealthToolbar({
             }}
             className="z-[60] w-72 rounded-xl border border-border bg-popover p-1 shadow-2xl max-h-[70vh] overflow-y-auto"
           >
-            {/* Maintain Wiki — described top item, only in manual mode.
-                Was previously a separate button outside the dropdown;
-                folded in here so the header keeps a single Tools button
-                and operators see context for what "Maintain" means. */}
-            {manualMode && (
-              <button
-                role="menuitem"
-                type="button"
-                onClick={() => {
-                  setToolsOpen(false);
-                  maintain.maintain();
-                }}
-                disabled={maintain.loading || !channelId}
-                className={TOOL_BTN_DESCRIBED + " disabled:opacity-50 disabled:cursor-not-allowed"}
-                aria-label="Maintain Wiki — re-run the maintainer on pages flagged dirty since the last run"
-              >
-                <span className="mt-0.5 flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-primary shrink-0">
-                  {maintain.loading ? (
-                    <Loader2 size={12} className="animate-spin" />
-                  ) : (
-                    <Sparkles size={12} />
-                  )}
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-foreground">
-                      {maintain.loading ? "Maintaining…" : "Maintain Wiki"}
-                    </span>
-                    {maintain.result && maintain.result.rewritten > 0 && (
-                      <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary tabular-nums">
-                        +{maintain.result.rewritten}
-                      </span>
-                    )}
-                  </span>
-                  <span className="block text-[11px] text-muted-foreground leading-snug mt-0.5">
-                    Re-run the maintainer on pages updated since the last pass.
-                  </span>
-                </span>
-              </button>
-            )}
-
-            {/* Lint Wiki — described item: explains what the lint scan
-                actually checks so operators know whether they need it. */}
+            {/* Health check — described item: explains what the lint
+                scan checks so operators know whether they need it.
+                Replaces both "Maintain Wiki" and the standalone Lint
+                button: Update wiki (footer primary) covers maintenance,
+                this surfaces rot signals (orphans, stale, duplicates,
+                coherence) without modifying the wiki itself. */}
             <button
               role="menuitem"
               type="button"
@@ -311,7 +274,7 @@ export function WikiHealthToolbar({
               }}
               disabled={lint.loading || !channelId}
               className={TOOL_BTN_DESCRIBED + " disabled:opacity-50 disabled:cursor-not-allowed"}
-              aria-label="Lint Wiki — scan for orphan, stale, duplicate, and coherence issues"
+              aria-label="Health check — scan for orphan, stale, duplicate, and coherence issues"
             >
               <span className="mt-0.5 flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
                 {lint.loading ? (
@@ -323,7 +286,7 @@ export function WikiHealthToolbar({
               <span className="flex-1 min-w-0">
                 <span className="flex items-center gap-1.5">
                   <span className="text-xs font-semibold text-foreground">
-                    {lint.loading ? "Linting…" : "Lint Wiki"}
+                    {lint.loading ? "Checking…" : "Health check"}
                   </span>
                   {lintBadge !== null && (
                     <span className="rounded-full bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
@@ -337,31 +300,32 @@ export function WikiHealthToolbar({
               </span>
             </button>
 
-            {/* Restructure tree — described item, only when wired by parent.
-                Re-runs the structure planner from scratch and rebuilds
-                the folder hierarchy. Distinct from Regenerate (which
-                rebuilds every page) — restructure can run alone when
-                you only want to re-plan folder boundaries. */}
-            {onRestructure && (
+            {/* Reorganize folders — described item. Re-runs the
+                structure planner against current pages. Page contents
+                may also refresh because the builder regenerates pages
+                in the same pass. Distinct from Update (which keeps the
+                folder structure intact) and Rebuild (which wipes
+                everything first). */}
+            {onReorganize && (
               <button
                 role="menuitem"
                 type="button"
                 onClick={() => {
                   setToolsOpen(false);
-                  onRestructure();
+                  onReorganize();
                 }}
                 className={TOOL_BTN_DESCRIBED}
-                aria-label="Restructure tree — re-plan the wiki's folder hierarchy from scratch"
+                aria-label="Reorganize folders — re-plan the wiki's folder hierarchy"
               >
                 <span className="mt-0.5 flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
                   <Network size={12} />
                 </span>
                 <span className="flex-1 min-w-0">
                   <span className="text-xs font-semibold text-foreground">
-                    Restructure tree
+                    Reorganize folders
                   </span>
                   <span className="block text-[11px] text-muted-foreground leading-snug mt-0.5">
-                    Re-plan folder boundaries from the agent's structure planner.
+                    Re-plan folder boundaries. Page contents may also refresh.
                   </span>
                 </span>
               </button>
@@ -515,8 +479,8 @@ export function WikiHealthToolbar({
               </button>
             )}
 
-            {/* Divider — only when Failures or Regenerate is shown */}
-            {(showFailuresItem || onRegenerate) && (
+            {/* Divider — only when Failures or Rebuild is shown */}
+            {(showFailuresItem || onRebuild) && (
               <div className="my-1 h-px bg-border/60" />
             )}
 
@@ -544,12 +508,18 @@ export function WikiHealthToolbar({
               </button>
             )}
 
-            {/* Regenerate from scratch — danger */}
-            {onRegenerate && (
+            {/* Rebuild from scratch — danger. Snapshots the current
+                wiki to history (so it's recoverable) then wipes the
+                cache and regenerates everything from current memories
+                with a fresh folder plan. Distinct from Reorganize
+                (which keeps page IDs + curation flags) — Rebuild is
+                the "reset to clean slate" action. */}
+            {onRebuild && (
               confirmRegenerate ? (
                 <div className="mt-1 rounded-md border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-2">
                   <p className="mb-2 text-[11px] text-red-700 dark:text-red-300 leading-snug">
-                    This will overwrite the current wiki. Continue?
+                    This will snapshot the current wiki to history then
+                    rebuild everything from scratch. Continue?
                   </p>
                   <div className="flex gap-1.5">
                     <button
@@ -557,18 +527,18 @@ export function WikiHealthToolbar({
                       onClick={() => {
                         setConfirmRegenerate(false);
                         setToolsOpen(false);
-                        onRegenerate();
+                        onRebuild();
                       }}
                       className="flex-1 rounded px-2 py-1 text-[11px] font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
-                      aria-label="Confirm regenerate wiki from scratch"
+                      aria-label="Confirm rebuild wiki from scratch"
                     >
-                      Regenerate
+                      Rebuild
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmRegenerate(false)}
                       className="rounded px-2 py-1 text-[11px] font-medium border border-border hover:bg-muted transition-colors"
-                      aria-label="Cancel regenerate"
+                      aria-label="Cancel rebuild"
                     >
                       Cancel
                     </button>
@@ -581,14 +551,14 @@ export function WikiHealthToolbar({
                   onClick={() => setConfirmRegenerate(true)}
                   disabled={isRegenerating}
                   className={TOOL_BTN + " text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/20 disabled:opacity-40 disabled:cursor-not-allowed"}
-                  aria-label="Regenerate wiki from scratch"
+                  aria-label="Rebuild wiki from scratch"
                 >
                   {isRegenerating ? (
                     <Loader2 size={12} className="animate-spin shrink-0" />
                   ) : (
                     <RefreshCw size={12} className="shrink-0" />
                   )}
-                  <span className="flex-1">Regenerate from scratch</span>
+                  <span className="flex-1">Rebuild from scratch</span>
                 </button>
               )
             )}
@@ -596,22 +566,6 @@ export function WikiHealthToolbar({
           document.body
         )}
       </div>
-
-      {/* Maintain error retry */}
-      {maintain.error && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-red-600 dark:text-red-400">Maintain failed</span>
-          <button
-            type="button"
-            onClick={() => maintain.maintain()}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border border-border hover:bg-muted transition-colors"
-            aria-label="Retry maintain"
-          >
-            <RefreshCw size={10} />
-            Retry
-          </button>
-        </div>
-      )}
 
       {/* Lint findings panel — Sheet-style, slides from right */}
       {reportOpen && (

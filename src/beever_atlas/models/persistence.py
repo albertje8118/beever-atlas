@@ -415,5 +415,14 @@ class WikiPage(BaseModel):
     Surfaced in the UI as a hint that the agent owns the structure
     decision."""
 
+    modules: list[dict[str, Any]] = Field(default_factory=list)
+    """Adaptive page module plan. Each entry is at minimum
+    ``{"id": str, "anchor": str}`` and MAY include ``"data": dict``
+    (per-module structured payload used by the maintainer for
+    surgical patching). Empty list means the page predates the
+    adaptive-modules system and the renderer falls back to the
+    legacy single-template flow over ``content``. See spec
+    ``adaptive-page-modules`` for the catalog."""
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

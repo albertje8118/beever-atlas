@@ -70,6 +70,20 @@ export interface WikiPage {
   children_fingerprint?: string | null;
   /** True for planner-produced folders (vs. hand-curated, future). */
   is_synthetic?: boolean;
+  /** Adaptive page module plan (``adaptive-wiki-page-content`` change).
+   *  Each entry is at minimum ``{id, anchor}`` with optional per-module
+   *  data payload. Empty array = legacy page; renderer falls back to
+   *  the single-template flow over ``content``. */
+  modules?: WikiPageModule[];
+}
+
+/** One entry in the adaptive page module plan. The ``data`` payload
+ *  shape varies per module type — frontend module renderers cast it
+ *  to their expected shape. */
+export interface WikiPageModule {
+  id: string;
+  anchor: string;
+  data?: Record<string, unknown>;
 }
 
 export interface WikiPageNode {
@@ -82,6 +96,9 @@ export interface WikiPageNode {
   children: WikiPageNode[];
   /** True for planner-produced folders (vs. hand-curated, future). */
   is_synthetic?: boolean;
+  /** Optional 1-2 sentence summary surfaced on the Overview's topic
+   *  card grid so each card shows context without a click-through. */
+  summary?: string;
 }
 
 export interface WikiStructure {

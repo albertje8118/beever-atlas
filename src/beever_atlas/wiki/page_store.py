@@ -399,6 +399,39 @@ class WikiPageStore:
         )
         return bool(result.deleted_count)
 
+    async def delete_all_for_channel(
+        self, channel_id: str, target_lang: str = "en"
+    ) -> int:
+        """Bulk-delete every page row for ``(channel_id, target_lang)``.
+
+        Used by the ``mode=rebuild`` path on POST /wiki/refresh to wipe
+        the per-page store alongside the legacy monolith cache so the
+        regeneration starts from a true clean slate. Without this,
+        rebuild silently leaves stale per-page docs (curation flags,
+        old slugs, dangling parent_id references) under the new
+        regeneration.
+
+        Also clears the ``wiki_redirects`` rows for the same scope —
+        redirects pointing at slugs that no longer exist would 404.
+        Returns the count of page rows deleted.
+        """
+        deleted = 0
+        if self._collection is not None:
+            result = await self._collection.delete_many(
+                {"channel_id": channel_id, "target_lang": target_lang}
+            )
+            deleted = int(result.deleted_count or 0)
+        if self._redirects is not None:
+            try:
+                await self._redirects.delete_many(
+                    {"channel_id": channel_id, "target_lang": target_lang}
+                )
+            except Exception:
+                # Best-effort — redirect rows are advisory; a stale
+                # redirect just resolves to "not found" on the next hit.
+                pass
+        return deleted
+
     # ------------------------------------------------------------------
     # wiki-llm-native-redesign — curation API support (§5.5)
     # ------------------------------------------------------------------

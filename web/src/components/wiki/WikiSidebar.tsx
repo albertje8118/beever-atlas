@@ -1,8 +1,9 @@
-import { useState, useMemo, type ComponentType } from "react";
+import { useState, useMemo, useEffect, type ComponentType } from "react";
 import {
   ChevronRight,
   ChevronDown,
   Folder,
+  FolderOpen,
   BookOpen,
   HelpCircle,
   BookText,
@@ -10,6 +11,7 @@ import {
   Clock,
   Library,
   FileText,
+  File,
 } from "lucide-react";
 import type { WikiPageNode } from "@/lib/types";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -21,15 +23,13 @@ import { wikiT } from "@/lib/wikiI18n";
 // otherwise lead the row.
 type LucideIcon = ComponentType<{ className?: string; size?: number }>;
 
+// Visual tuning constants — single source of truth so the cascade of
+// indented rows stays predictable.
+const INDENT_PX = 10; // per-level horizontal step (was 14 — too greedy at depth 3+)
+const ROW_BASE_PADDING = 8;
+const AUTO_EXPAND_MAX_DEPTH = 2; // root + first level of nesting expand by default
+
 // Renumber topic section_numbers for sidebar display.
-//
-// The wiki generator numbers Overview as "1", Topics as "2.X" (so 2.1,
-// 2.2, …, 2.21), then other fixed pages as "3", "4", "5", etc. Now that
-// fixed pages are rendered with icons (their section numbers don't
-// appear in the sidebar at all), the visible numeric column starts at
-// "2.1" — which reads oddly as "where's 1.X?". Strip the leading "2"
-// so topics display as 1.1, 1.2, …, 1.21 — the only numeric hierarchy
-// the operator sees.
 function displaySectionNumber(num: string): string {
   if (!num) return num;
   if (num === "2") return "1";
@@ -49,6 +49,28 @@ function iconForFixedPage(node: WikiPageNode): LucideIcon {
   if (key.includes("resource") || key.includes("media") || key.includes("link"))
     return Library;
   return FileText;
+}
+
+// Folder colour tone fades with depth so the eye groups by hierarchy.
+function folderToneClasses(depth: number, expanded: boolean): string {
+  if (depth <= 1) return expanded ? "text-primary" : "text-primary/80";
+  if (depth === 2) return expanded ? "text-foreground/80" : "text-muted-foreground/80";
+  return "text-muted-foreground/60";
+}
+
+// Strip a leading prefix (case-insensitive, word-boundary) from a
+// title, falling back to the original if stripping leaves it empty
+// or barely shorter than the prefix itself.
+function stripPrefix(title: string, prefix: string): string {
+  if (!prefix) return title;
+  const t = title.trim();
+  const p = prefix.trim();
+  if (!t || !p) return title;
+  // Word-boundary match: prefix at start, followed by space/punctuation/end.
+  const re = new RegExp(`^${escapeRegExp(p)}(\\s*[:\\-–—·]?\\s*)`, "i");
+  const stripped = t.replace(re, "").trim();
+  if (!stripped) return title;
+  return stripped;
 }
 
 interface WikiSidebarProps {
@@ -71,14 +93,12 @@ interface SidebarItemProps {
 function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: SidebarItemProps) {
   const fullTitle = [node.section_number, node.title].filter(Boolean).join(" ");
   const shownTitle = displayTitle ?? node.title;
-  // Fixed pages (Overview, FAQ, Glossary, People & Experts, Recent
-  // Activity, Resources & Media) lead with a recognizable icon instead
-  // of a numeric prefix. Folder pages (planner-produced) use the
-  // Folder icon. The numeric structure is reserved for topics and
-  // sub-topics where it carries real semantic meaning (2.1, 2.21).
   const isFixed = node.page_type === "fixed";
-  const isBackendFolder = node.page_type === "folder";
   const FixedIcon = isFixed ? iconForFixedPage(node) : null;
+  // Loose leaf topics (no children) get a subtle file icon so the eye
+  // can pick them out from folder rows of the same indent. Numbered
+  // section badge stays for semantic anchoring.
+  const showLeafIcon = !isFixed && (node.children?.length ?? 0) === 0;
 
   return (
     <Tooltip>
@@ -87,42 +107,33 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
           <button
             onClick={onClick}
             aria-label={fullTitle}
-            className={`group/row relative flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+            className={`group/row relative flex items-start gap-1.5 w-full rounded-md py-1.5 pr-2 text-left text-[13px] leading-snug transition-colors ${
               isActive
                 ? "bg-primary/10 text-primary border-l-2 border-primary font-medium"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
             }`}
-            style={{ paddingLeft: `${10 + indent * 14}px` }}
+            style={{ paddingLeft: `${ROW_BASE_PADDING + indent * INDENT_PX}px` }}
           >
             {FixedIcon ? (
-              <span className="shrink-0 flex h-5 w-7 items-center justify-center text-muted-foreground/75">
+              <span className="shrink-0 mt-0.5 flex h-4 w-5 items-center justify-center text-muted-foreground/75">
                 <FixedIcon size={14} />
               </span>
-            ) : isBackendFolder ? (
-              <span className="shrink-0 flex h-5 w-7 items-center justify-center text-primary/75">
-                <Folder size={14} />
+            ) : showLeafIcon ? (
+              <span className="shrink-0 mt-0.5 flex h-4 w-5 items-center justify-center text-muted-foreground/40">
+                <File size={12} />
               </span>
             ) : (
-              /* Section number leads for topics — eye scans by number
-                 first. Tooltip carries the full title for ambiguous
-                 truncations. */
-              <span className="text-[11px] text-muted-foreground/80 font-mono font-semibold shrink-0 tabular-nums">
+              <span className="shrink-0 mt-0.5 w-5" aria-hidden="true" />
+            )}
+            {!isFixed && node.section_number && (
+              <span className="shrink-0 mt-0.5 text-[10.5px] text-muted-foreground/70 font-mono font-semibold tabular-nums">
                 {displaySectionNumber(node.section_number)}
               </span>
             )}
-            <span className="truncate flex-1">{shownTitle}</span>
-            {/* Memory count — hidden by default (display:none, no
-                layout slot reserved), revealed on row hover. Using
-                ``hidden`` instead of ``opacity-0`` is critical: the
-                opacity approach kept the right-side slot reserved and
-                forced the title to truncate ~40px earlier than it had
-                to. With display:none the title can use the full row
-                width when not hovered, and the count overlays via
-                absolute positioning on hover so the title doesn't
-                shift when it appears. */}
+            <span className="flex-1 min-w-0 break-words line-clamp-2">{shownTitle}</span>
             {node.memory_count > 0 && (
-              <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
-                {node.memory_count} memories
+              <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[10.5px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
+                {node.memory_count}
               </span>
             )}
           </button>
@@ -138,6 +149,114 @@ function SidebarItem({ node, isActive, onClick, indent = 0, displayTitle }: Side
   );
 }
 
+/** Folder row — distinct visual treatment from topic rows so the
+ *  hierarchy reads at a glance. */
+interface FolderRowProps {
+  node: WikiPageNode;
+  isActive: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  onNavigate: () => void;
+  indent: number;
+  childCount: number;
+  totalMemories: number;
+  depth: number;
+  displayTitle?: string;
+}
+
+function FolderRow({
+  node,
+  isActive,
+  expanded,
+  onToggle,
+  onNavigate,
+  indent,
+  childCount,
+  totalMemories,
+  depth,
+  displayTitle,
+}: FolderRowProps) {
+  const fullTitle = [node.section_number, node.title].filter(Boolean).join(" ");
+  const shownTitle = displayTitle ?? node.title;
+  const FolderIcon = expanded ? FolderOpen : Folder;
+  const folderTone = folderToneClasses(depth, expanded);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <div
+            className={`group/row relative flex items-start gap-1 w-full rounded-md py-1.5 pr-2 text-left text-[13px] leading-snug transition-colors ${
+              isActive
+                ? "bg-primary/10 text-primary border-l-2 border-primary font-semibold"
+                : "text-foreground/90 hover:bg-muted"
+            }`}
+            style={{ paddingLeft: `${ROW_BASE_PADDING + indent * INDENT_PX}px` }}
+            aria-label={fullTitle}
+          >
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              className="shrink-0 mt-0.5 p-0.5 -m-0.5 text-muted-foreground/70 hover:text-foreground rounded"
+              aria-label={expanded ? "Collapse folder" : "Expand folder"}
+              aria-expanded={expanded}
+            >
+              {expanded ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onNavigate}
+              className="flex-1 min-w-0 flex items-start gap-1.5 text-left"
+            >
+              <span className={`shrink-0 mt-0.5 flex h-4 w-5 items-center justify-center ${folderTone}`}>
+                <FolderIcon size={depth <= 1 ? 14 : 13} />
+              </span>
+              <span className={`flex-1 min-w-0 break-words line-clamp-2 ${depth <= 1 ? "font-semibold" : "font-medium"}`}>
+                {shownTitle}
+              </span>
+              <span className="shrink-0 mt-0.5 text-[10.5px] text-muted-foreground/55 tabular-nums">
+                {childCount}
+              </span>
+            </button>
+            {totalMemories > 0 && (
+              <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[10.5px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
+                {totalMemories} memories
+              </span>
+            )}
+          </div>
+        }
+      />
+      <TooltipContent side="right" className="text-xs max-w-xs">
+        {fullTitle}
+        <span className="ml-1 text-muted-foreground/70">
+          · {childCount} pages
+          {totalMemories > 0 && ` · ${totalMemories} memories`}
+        </span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Recursively count direct + nested descendants of a node. */
+function countDescendants(node: WikiPageNode): { count: number; memories: number } {
+  let count = 0;
+  let memories = node.memory_count ?? 0;
+  for (const child of node.children) {
+    count += 1;
+    const sub = countDescendants(child);
+    count += sub.count;
+    memories += sub.memories;
+  }
+  return { count, memories };
+}
+
 /** Check if any descendant of a node matches the active page ID */
 function hasActiveChild(node: WikiPageNode, activePageId: string): boolean {
   for (const child of node.children) {
@@ -147,70 +266,161 @@ function hasActiveChild(node: WikiPageNode, activePageId: string): boolean {
   return false;
 }
 
-interface TopicItemWithChildrenProps {
+interface TreeNodeProps {
   node: WikiPageNode;
   activePageId: string;
   onNavigate: (pageId: string) => void;
   indent: number;
+  /** Distance from the Topics section root. 1 == top-level folder/topic. */
+  depth: number;
   displayTitle?: string;
+  /** Stack of ancestor folder titles, root → immediate parent. Used
+   *  to strip the WHOLE ancestor chain from this node's display title
+   *  so a child of `[Beever Atlas Project] > [Development & Integration]`
+   *  doesn't render as "Beever Atlas Project Development and Integration X". */
+  ancestorTitles?: string[];
 }
 
-function TopicItemWithChildren({
+function TreeNode({
   node,
   activePageId,
   onNavigate,
   indent,
+  depth,
   displayTitle,
-}: TopicItemWithChildrenProps) {
+  ancestorTitles = [],
+}: TreeNodeProps) {
   const isActive = activePageId === node.id;
   const hasChildren = node.children.length > 0;
   const childIsActive = hasActiveChild(node, activePageId);
-  const [userExpanded, setUserExpanded] = useState(false);
-  const expanded = childIsActive || userExpanded;
+  const isFolder = node.page_type === "folder";
 
-  return (
-    <div>
-      <div className="flex items-center">
-        {hasChildren && (
+  // Auto-expand on first mount when shallow enough so users see the
+  // structure without clicking. Deeper levels stay collapsed to avoid
+  // a 100-row wall-of-text on regenerate.
+  const initiallyExpanded = childIsActive || depth <= AUTO_EXPAND_MAX_DEPTH;
+  const [userExpanded, setUserExpanded] = useState<boolean>(initiallyExpanded);
+  // Re-evaluate auto-expansion when a different page becomes active so
+  // navigating to a deep page reveals its ancestor chain.
+  useEffect(() => {
+    if (childIsActive) setUserExpanded(true);
+  }, [childIsActive]);
+  const expanded = userExpanded;
+
+  // Inside a folder, redundant "<Folder Name> ..." prefixes on every
+  // child page kill readability. Strip the WHOLE ancestor chain so
+  // children of "Beever Atlas Project > Development & Integration"
+  // don't render as "Beever Atlas Project Development and Integration X"
+  // — try the longest (most specific) ancestor first, peeling back to
+  // shorter ancestors until something strips successfully.
+  let stripped = node.title;
+  if (!displayTitle) {
+    // Try concatenated ancestor chain first (longest prefix), then
+    // each ancestor individually from immediate-parent outward.
+    const concatChain = ancestorTitles.join(" ");
+    if (concatChain) {
+      const candidate = stripPrefix(stripped, concatChain);
+      if (candidate !== stripped) stripped = candidate;
+    }
+    // Then try each ancestor individually (immediate parent first)
+    // in case the title only echoes one level of the chain.
+    for (let i = ancestorTitles.length - 1; i >= 0; i--) {
+      const candidate = stripPrefix(stripped, ancestorTitles[i]);
+      if (candidate !== stripped) stripped = candidate;
+    }
+  }
+  const effectiveDisplayTitle = displayTitle ?? stripped;
+  const childAncestors = isFolder ? [...ancestorTitles, node.title] : ancestorTitles;
+
+  if (isFolder) {
+    const { count, memories } = countDescendants(node);
+    return (
+      <div>
+        <FolderRow
+          node={node}
+          isActive={isActive}
+          expanded={expanded}
+          onToggle={() => setUserExpanded((p) => !p)}
+          onNavigate={() => onNavigate(node.id)}
+          indent={indent}
+          childCount={count}
+          totalMemories={memories}
+          depth={depth}
+          displayTitle={effectiveDisplayTitle}
+        />
+        {expanded && hasChildren && (
+          <div>
+            {node.children.map((child) => (
+              <TreeNode
+                key={child.id}
+                node={child}
+                activePageId={activePageId}
+                onNavigate={onNavigate}
+                indent={indent + 1}
+                depth={depth + 1}
+                ancestorTitles={childAncestors}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Topic with optional sub-topic children — uses an inline chevron
+  // (not the full FolderRow chrome) so it stays visually lighter than
+  // a folder.
+  if (hasChildren) {
+    return (
+      <div>
+        <div className="flex items-start">
           <button
-            onClick={() => setUserExpanded((prev) => !prev)}
-            className="p-0.5 text-muted-foreground/60 hover:text-foreground shrink-0"
-            style={{ marginLeft: `${6 + indent * 14}px` }}
+            onClick={() => setUserExpanded((p) => !p)}
+            className="p-0.5 mt-1.5 text-muted-foreground/60 hover:text-foreground shrink-0"
+            style={{ marginLeft: `${ROW_BASE_PADDING - 4 + indent * INDENT_PX}px` }}
             aria-label={expanded ? "Collapse sub-topics" : "Expand sub-topics"}
+            aria-expanded={expanded}
           >
             {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           </button>
-        )}
-        <div className="flex-1 min-w-0">
-          <SidebarItem
-            node={node}
-            isActive={isActive}
-            onClick={() => onNavigate(node.id)}
-            indent={hasChildren ? 0 : indent + 1}
-            displayTitle={displayTitle}
-          />
-        </div>
-      </div>
-      {hasChildren && expanded && (
-        <div>
-          {node.children.map((child) => (
-            // Render recursively so nested folders (folder → folder
-            // → topic) get their own chevron + indented child list.
-            // The original code rendered children as a flat
-            // SidebarItem which worked for 2-level sub-topics but
-            // silently dropped grandchildren in the n-depth folder
-            // tree the structure planner produces.
-            <TopicItemWithChildren
-              key={child.id}
-              node={child}
-              activePageId={activePageId}
-              onNavigate={onNavigate}
-              indent={indent + 1}
+          <div className="flex-1 min-w-0">
+            <SidebarItem
+              node={node}
+              isActive={isActive}
+              onClick={() => onNavigate(node.id)}
+              indent={0}
+              displayTitle={effectiveDisplayTitle}
             />
-          ))}
+          </div>
         </div>
-      )}
-    </div>
+        {expanded && (
+          <div>
+            {node.children.map((child) => (
+              <TreeNode
+                key={child.id}
+                node={child}
+                activePageId={activePageId}
+                onNavigate={onNavigate}
+                indent={indent + 1}
+                depth={depth + 1}
+                ancestorTitles={childAncestors}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Leaf
+  return (
+    <SidebarItem
+      node={node}
+      isActive={isActive}
+      onClick={() => onNavigate(node.id)}
+      indent={indent}
+      displayTitle={effectiveDisplayTitle}
+    />
   );
 }
 
@@ -249,14 +459,11 @@ function groupByPrefix(nodes: WikiPageNode[]): SidebarRow[] {
   const out: SidebarRow[] = [];
   let i = 0;
   while (i < nodes.length) {
-    // Look ahead to find the longest run with a 2+ word common prefix.
     let runEnd = i;
     let prefix = "";
     if (i + 1 < nodes.length) {
       let candidatePrefix = commonWordPrefix(nodes[i].title, nodes[i + 1].title);
       if (candidatePrefix.split(/\s+/).filter(Boolean).length >= 2) {
-        // Extend the run while neighbors keep matching the (possibly
-        // shrinking) common prefix.
         runEnd = i + 1;
         prefix = candidatePrefix;
         for (let j = i + 2; j < nodes.length; j++) {
@@ -270,8 +477,6 @@ function groupByPrefix(nodes: WikiPageNode[]): SidebarRow[] {
         }
       }
     }
-    // Need at least 3 items in the run for grouping to pay off; below
-    // that the chrome of the cluster row costs more than it saves.
     if (runEnd - i >= 2) {
       out.push({
         kind: "group",
@@ -294,56 +499,65 @@ interface PrefixGroupProps {
   activePageId: string;
   onNavigate: (pageId: string) => void;
   indent: number;
+  depth: number;
 }
 
-function PrefixGroup({ prefix, items, activePageId, onNavigate, indent }: PrefixGroupProps) {
+function PrefixGroup({ prefix, items, activePageId, onNavigate, indent, depth }: PrefixGroupProps) {
   const childActive = items.some(
     (n) => n.id === activePageId || hasActiveChild(n, activePageId),
   );
-  const [userExpanded, setUserExpanded] = useState(false);
-  const expanded = childActive || userExpanded;
+  // Synthetic prefix groups also auto-expand when shallow so the user
+  // sees what's inside without an extra click.
+  const [userExpanded, setUserExpanded] = useState<boolean>(
+    childActive || depth <= AUTO_EXPAND_MAX_DEPTH,
+  );
+  useEffect(() => {
+    if (childActive) setUserExpanded(true);
+  }, [childActive]);
+  const expanded = userExpanded;
   const totalMemories = items.reduce((s, n) => s + (n.memory_count ?? 0), 0);
+  const folderTone = folderToneClasses(depth, expanded);
+  const FolderIcon = expanded ? FolderOpen : Folder;
 
   return (
     <div>
       <button
         onClick={() => setUserExpanded((v) => !v)}
-        className="group/row relative flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-        style={{ paddingLeft: `${10 + indent * 14}px` }}
+        className="group/row relative flex items-start gap-1.5 w-full rounded-md py-1.5 pr-2 text-left text-[13px] leading-snug text-foreground/85 hover:bg-muted hover:text-foreground transition-colors"
+        style={{ paddingLeft: `${ROW_BASE_PADDING + indent * INDENT_PX}px` }}
         aria-expanded={expanded}
       >
         {expanded ? (
-          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+          <ChevronDown className="h-3 w-3 mt-1 shrink-0 text-muted-foreground/70" />
         ) : (
-          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+          <ChevronRight className="h-3 w-3 mt-1 shrink-0 text-muted-foreground/70" />
         )}
-        <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-        <span className="truncate flex-1 font-medium">{prefix}</span>
-        {/* Folder counts — overlay on hover, no width reserved when
-            hidden so the prefix gets the whole row to truncate against. */}
-        <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
-          {items.length} pages
-          {totalMemories > 0 && ` · ${totalMemories} memories`}
+        <span className={`shrink-0 mt-0.5 ${folderTone}`}>
+          <FolderIcon size={13} />
         </span>
+        <span className="flex-1 min-w-0 break-words line-clamp-2 font-medium italic">{prefix}</span>
+        <span className="shrink-0 mt-0.5 text-[10.5px] text-muted-foreground/55 tabular-nums">
+          {items.length}
+        </span>
+        {totalMemories > 0 && (
+          <span className="hidden group-hover/row:inline absolute right-2 top-1/2 -translate-y-1/2 text-[10.5px] text-muted-foreground/70 tabular-nums bg-muted/95 backdrop-blur-sm px-1.5 py-0.5 rounded">
+            {totalMemories} memories
+          </span>
+        )}
       </button>
       {expanded && (
         <div>
           {items.map((node) => {
-            // Strip the shared prefix from the displayed title so only
-            // the differentiating tail remains; if stripping leaves an
-            // empty string, fall back to the full title.
-            const stripped = node.title
-              .replace(new RegExp(`^${escapeRegExp(prefix)}\\s*`, "i"), "")
-              .trim();
-            const displayTitle = stripped.length > 0 ? stripped : node.title;
+            const stripped = stripPrefix(node.title, prefix);
             return (
-              <TopicItemWithChildren
+              <TreeNode
                 key={node.id}
                 node={node}
                 activePageId={activePageId}
                 onNavigate={onNavigate}
                 indent={indent + 1}
-                displayTitle={displayTitle}
+                depth={depth + 1}
+                displayTitle={stripped}
               />
             );
           })}
@@ -359,10 +573,6 @@ function escapeRegExp(s: string): string {
 
 export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSidebarProps) {
   const [topicsExpanded, setTopicsExpanded] = useState(true);
-  // Folder pages (planner-produced) are first-class root nodes — they
-  // render at the TOP of the Topics section, ahead of any loose topics.
-  // Loose topics still get prefix-grouping; folders bypass it because
-  // they already represent a real backend grouping.
   const folderPages = pages.filter((p) => p.page_type === "folder");
   const topicPages = pages.filter((p) => p.page_type === "topic");
   const fixedPages = pages.filter((p) => p.page_type === "fixed");
@@ -370,10 +580,6 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
   const overviewPage = fixedPages.find((p) => p.id === "overview");
   const afterTopicPages = fixedPages.filter((p) => p.id !== "overview");
 
-  // Compute prefix-groups once per topicPages reference. The grouping
-  // is heuristic and stable: same input → same row layout. Folder
-  // pages are intentionally excluded — they're already a structural
-  // grouping and shouldn't get re-grouped by prefix.
   const grouped = useMemo(() => groupByPrefix(topicPages), [topicPages]);
 
   return (
@@ -402,15 +608,24 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
               ({folderPages.length + topicPages.length})
             </span>
           </button>
-          {topicsExpanded && folderPages.map((folder) => (
-            <TopicItemWithChildren
-              key={folder.id}
-              node={folder}
-              activePageId={activePageId}
-              onNavigate={onNavigate}
-              indent={1}
-            />
-          ))}
+          {topicsExpanded &&
+            folderPages.map((folder) => (
+              <TreeNode
+                key={folder.id}
+                node={folder}
+                activePageId={activePageId}
+                onNavigate={onNavigate}
+                indent={1}
+                depth={1}
+              />
+            ))}
+          {topicsExpanded && folderPages.length > 0 && topicPages.length > 0 && (
+            <div className="mt-1 mb-0.5 px-3 pt-1 pb-0.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/55">
+              <span className="h-px flex-1 bg-border/50" />
+              <span>Other topics ({topicPages.length})</span>
+              <span className="h-px flex-1 bg-border/50" />
+            </div>
+          )}
           {topicsExpanded &&
             grouped.map((row) => {
               if (row.kind === "group") {
@@ -422,16 +637,18 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
                     activePageId={activePageId}
                     onNavigate={onNavigate}
                     indent={1}
+                    depth={1}
                   />
                 );
               }
               return (
-                <TopicItemWithChildren
+                <TreeNode
                   key={row.node.id}
                   node={row.node}
                   activePageId={activePageId}
                   onNavigate={onNavigate}
                   indent={1}
+                  depth={1}
                 />
               );
             })}

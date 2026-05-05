@@ -268,6 +268,13 @@ class WikiPage(BaseModel):
     children_fingerprint: str | None = None
     is_synthetic: bool = False
 
+    # Adaptive page module plan (``adaptive-wiki-page-content`` change).
+    # Each entry is at minimum ``{"id": str, "anchor": str}`` with an
+    # optional ``"data": dict`` payload the maintainer reads for
+    # surgical patching. Empty list = legacy page; renderer falls back
+    # to the single-template flow over ``content``.
+    modules: list[dict[str, Any]] = Field(default_factory=list)
+
     @property
     def is_folder(self) -> bool:
         """True when this page is a structure-planner folder (or
@@ -287,6 +294,11 @@ class WikiPageNode(BaseModel):
     memory_count: int = 0
     children: list["WikiPageNode"] = Field(default_factory=list)
     is_synthetic: bool = False
+    # Optional one-line summary (1-2 sentences) used by the Overview's
+    # topic-card grid so each card can show a brief description without
+    # the user having to click through. Populated by the structure
+    # serialiser from the corresponding WikiPage.summary field.
+    summary: str = ""
 
 
 class WikiStructure(BaseModel):

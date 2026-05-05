@@ -25,12 +25,14 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 
 ## Content structure (follow this order strictly — INTRO FIRST, then visuals)
 1. **Brief intro** — 2-3 sentences describing what this channel is about, its purpose, and the key knowledge areas it covers. THIS MUST BE THE VERY FIRST CONTENT. Set the context for the reader before showing any visuals.
-2. **Concept map** — ```mermaid flowchart showing how the main topics/themes relate to each other. Use the topic relationships data to build accurate connections.
+2. **Concept map** — ```mermaid flowchart showing how the main themes relate. Use the topic relationships data to build accurate connections. Prefer a small number of high-signal edges (≤ 12) over an exhaustive web — the goal is a glanceable overview, not a citation graph.
 3. **Key Highlights table** — GFM table summarizing: total topics, decisions made, key contributors, resources shared, active period. **CRITICAL**: use the EXACT numbers from the channel-data block below — `{decisions_count}` for "Decisions Made", `{people_count}` for "Key Contributors", `{media_count}` for "Resources Shared". Do NOT recompute these from topic descriptions; the provided counts are authoritative.
-4. **Topics at a glance** — bullet list of each topic with 1-line description and memory count. Topics with `"brief": true` in the data are minor/off-topic and were not given full pages — append "(brief mention)" after their entry.
-5. **Key contributors** — bullet list of most active people and their roles/expertise
-6. **Tools & resources** — if technologies or tools data exists, show as bullet list or GFM table. Skip this section entirely if no tools/technologies are relevant.
-7. **Recent momentum** — 2-3 sentences on what's currently active or changing. Reference the activity summary data.
+4. **Key contributors** — bullet list of most active people and their roles/expertise. When folder structure exists, GROUP contributors by the folder/area they're most active in (e.g. `**Security & Code Quality** — Jacky Chan, Alan Yang`). Otherwise list flat.
+5. **Tools & resources** — if technologies or tools data exists, show as bullet list or GFM table. Skip this section entirely if no tools/technologies are relevant.
+
+DROPPED SECTIONS (do NOT emit):
+- "Topics at a glance" — the renderer shows folder cards + topic cards directly with previews; a duplicate bullet list is noise.
+- "Recent momentum" — the renderer shows freshness chips in the header; a vague prose summary adds no signal.
 
 ## Writing style
 - **Synthesize, don't narrate.** Transform raw facts into insights. Write "The team identified context graphs as a key architecture pattern for agent safety [1]" — NOT "Jacky Chan shared a link about context graphs [1]".
@@ -97,8 +99,8 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 6. **Contributors** — bullet list of people involved with their roles (decision maker, contributor, expert, mentioned)
 7. **Tools & resources** — if technologies/tools exist, bullet list. Skip if none.
 8. **Current state & open questions** — what's resolved vs. still open. Use bullet points. Each open question MUST include when it was first raised (e.g., "(raised Jan 2026)") so readers can assess staleness.
-9. **Media & Resources** — if media exists, each item MUST have a brief description line explaining what it shows/contains BEFORE the embed/link. Format: `**Dashboard Screenshot** — Shows the Insights dashboard with memory health metrics.` followed by `![Dashboard](url)`. Do NOT use bare bullet points with just a link. Skip if none.
-10. **See Also** — if related topics exist, list them as bullet points with their titles. Format: `- **[Related Topic Title]**` — one line each. Skip if no related topics.
+9. **Media & Resources** — if media exists, each item MUST have a brief description line explaining what it shows/contains BEFORE the embed/link. **For IMAGES** (URLs ending in .png/.jpg/.jpeg/.gif/.webp/.svg, OR URLs from `files.mattermost.com` / `files.slack.com` / image-hosting domains), use IMAGE syntax `![Alt text](url)` — NOT link syntax `[Title](url)` — so the wiki renders an inline preview. **For PDFs and links**, use link syntax `[Title](url)`. **For VIDEOS** (URLs from youtube.com / vimeo.com or ending in .mp4/.webm), use link syntax `[Video title](url)` and the renderer will detect + embed. Do NOT use bare bullet points with just a link. Skip if none.
+10. **See Also** — if related topics exist (use the `related_topics` data block — each entry has `title` and `id`), list them as MARKDOWN LINKS so the UI can route to the destination. **MAX 5 entries.** Each line: `- **[Title](/wiki/<slug>)** — one-line reason this topic is related (shared people, shared entities, downstream dependency, etc.)`. The `<slug>` is the part of the related topic's id AFTER the `topic-` prefix (e.g., id `topic-auth-migration` → `[Title](/wiki/auth-migration)`). Pick the 5 most strongly related — DO NOT dump every other topic in the wiki. Skip the section entirely when no truly related topics exist (a wall of weakly-related links is worse than no links).
 
 ## Writing style
 - **Synthesize, don't narrate.** Write "The team adopted a wiki-first architecture for 10x cost reduction [1]" — NOT "Thomas Chong shared that the wiki-first architecture offers cost reduction [1]".
@@ -605,6 +607,116 @@ Return the JSON now.
 # ``<<CHILDREN_TOC>>`` on its own line. The renderer replaces it with
 # a deterministic auto-TOC of children — that way operators always see
 # the actual children even if the LLM drifts from the prompt.
+# ---------------------------------------------------------------------------
+# adaptive-wiki-page-content — unified single-call prompt
+# ---------------------------------------------------------------------------
+#
+# The catalog selection + module rendering + body authorship happen in
+# ONE LLM call. The validator runs post-response and drops modules
+# whose criteria fail; the deterministic renderers fill marker
+# substitutions. Cost stays at one call per topic page (same as the
+# legacy monolithic prompt) but the structured plan + selection rules
+# force the model to think about page shape before writing.
+
+MODULE_COMPILE_PROMPT = """You are an adaptive wiki page compiler. In ONE response, decide which content modules best fit this topic's data shape AND write the page body that uses them.
+
+## Module catalog (selection rules)
+
+{module_catalog_block}
+
+## Topic signals (use these to decide module eligibility)
+
+{signals_json}
+
+## Topic data (for prose context — DO NOT re-emit structured data; the renderer fills markers)
+
+Title: {title}
+Summary: {summary}
+Key facts (top 8): {top_facts_json}
+Key contributors: {top_people_json}
+Active period: {date_range_start} – {date_range_end}
+
+## Output
+
+Return JSON ONLY with this exact shape:
+
+{{
+  "plan": {{
+    "modules": [
+      {{ "id": "<module_id>", "anchor": "<short alphanumeric>" }},
+      ...
+    ],
+    "media_pins": [
+      {{ "media_id": "<id>", "fact_id": "<id>", "slot": "hero|inline|gallery" }}
+    ]
+  }},
+  "tldr": "<single bold sentence — the key insight>",
+  "overview": "<2-3 sentence prose framing what the topic is, why it matters, and current state>",
+  "body": "<markdown body containing module markers + short connector prose>"
+}}
+
+## Module-selection rules
+
+- Pick **3 to 7 modules** total. Below 3 the page reads as a stub; above 7 it reads as a kitchen sink.
+- A module is ELIGIBLE only when its selection rule (in the catalog above) is satisfied. Do NOT pick a module whose rule is not met — the validator will drop it.
+- Order modules by reading priority: facts/decisions first, supporting visuals second, related/navigation last.
+- Anchors are lowercase + alphanumeric + dashes, ≤ 24 chars (e.g., `decision-log`, `related-threads`).
+- For media: pick AT MOST ONE `media_hero` per page. Pin `media_inline` items to a fact_id. Pool unpinned media into `media_gallery`.
+
+## Body authoring rules
+
+- The body MUST contain one ``<<MODULE:<id>>>`` marker per module in your plan, in plan order. The compiler substitutes each marker with the module's deterministic content.
+- Optionally include a 1-2 sentence connector paragraph BEFORE each marker (e.g. "Three decisions shaped the rollout schedule:" before `<<MODULE:decision_log>>`). Connectors are optional — skip when the module's heading is self-explanatory.
+- For `media_inline:<media_id>` markers, place each marker IMMEDIATELY after the paragraph discussing the source fact for that media. The reader sees the visual alongside the prose that introduces it.
+- Do NOT re-emit structured data the modules render (no decision tables, no fact tables, no quote blockquotes, no entity graphs in the body — emit the marker instead).
+- Do NOT write a "Sources" or "References" section. The CitationPanel renders those.
+- Do NOT use @ / # / $ entity prefixes — write names normally.
+
+## Hard rules
+
+- Output JSON ONLY. No markdown fences around the outer JSON. No prose before or after the outer object.
+- TL;DR is exactly ONE sentence, bolded with `**…**`.
+- Overview is 2-3 sentences. No more.
+- Body word count ≤ 350 (excluding markers + connector prose). Connectors are tight one-liners; deep prose belongs inside the relevant module's data, not in the body.
+- If you cannot satisfy any module's selection rule (extreme thin-data topic), pick `key_facts` only and write a minimal body containing only `<<MODULE:key_facts>>`.
+"""
+
+
+def build_module_compile_prompt(
+    *,
+    signals: dict,
+    module_catalog: list[dict],
+    title: str,
+    summary: str,
+    top_facts: list[dict],
+    top_people: list[dict],
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> str:
+    """Render ``MODULE_COMPILE_PROMPT`` with the topic signals + catalog
+    + page-level metadata. Single-call: planner + writer collapsed
+    into one prompt so cost stays at 1 LLM call per topic page."""
+    import json as _json
+
+    catalog_lines: list[str] = []
+    for entry in module_catalog:
+        catalog_lines.append(
+            f"- **{entry['id']}** ({entry['label']}) — {entry['description']} "
+            f"_Rule:_ {entry['rule']}"
+        )
+    catalog_block = "\n".join(catalog_lines)
+    return MODULE_COMPILE_PROMPT.format(
+        module_catalog_block=catalog_block,
+        signals_json=_json.dumps(signals, indent=2, default=str),
+        title=title,
+        summary=summary,
+        top_facts_json=_json.dumps(top_facts[:8], indent=2, default=str),
+        top_people_json=_json.dumps(top_people[:6], indent=2, default=str),
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
 FOLDER_INDEX_PROMPT = """You are a knowledge wiki compiler. Create a **Folder Index** page that explains what's inside this folder and helps the reader navigate to the right sub-page.
 
 ## Inputs
@@ -629,17 +741,18 @@ The markdown body MUST:
 
 1. Open with a 2-3 sentence intro that frames what this folder covers — the domain, the scope, why it exists. Make it specific to the children listed above; do NOT write a generic "this folder contains topics" line.
 
-2. On its own line, include the literal token `<<CHILDREN_TOC>>`. The compiler will replace this with a deterministic table of contents of the direct children — DO NOT write the TOC yourself, just emit the marker.
+2. On its own line, include the literal token `<<CHILDREN_TOC>>`. The compiler will replace this with a navigation list AND the frontend renders it as rich cards. Each child's per-bullet summary is what populates the per-card description — write each child's `summary` (in the input) as a SINGLE COMPLETE SENTENCE (40-90 chars) that names the concrete subject of that page. Avoid trailing fragments like "covering architectural discussions, platfo" — finish the sentence.
 
-3. After the marker, write 1-3 short paragraphs that highlight the most important threads connecting the children (shared people, recurring decisions, key tensions, or open questions). Reference children by their titles. This is what makes the folder PAGE valuable beyond just its TOC.
+3. After the marker, write 2-4 short paragraphs of synthesis under an implicit "themes & threads" framing — the frontend will surface them under that heading. Cover at least: (a) the most important throughline connecting the children, (b) the key contributors active across this folder and what they own, (c) any unresolved tension or open question worth flagging. Reference children by their titles. This is what makes the folder PAGE valuable beyond just its TOC.
 
-4. Stay between **200 and 400 words** total (excluding the marker line). Folders that need more depth should rely on their child pages — the index is a wayfinding device, not a deep dive.
+4. Stay between **300 and 500 words** total (excluding the marker line). Folders that need more depth should rely on their child pages — the index is a wayfinding device + a synthesis layer, not a deep dive.
 
 ## Hard rules
 
 - Output JSON ONLY. No markdown code fences. No leading or trailing prose outside the JSON.
 - Use plain Markdown (no callouts, no mermaid diagrams in the index — those belong on leaf pages).
 - The `summary` field is 1-2 sentences max, suitable for a card or hover preview.
+- NEVER truncate a sentence with a fragment. Every sentence must end with a period (or `?`/`!`). Cut the sentence shorter rather than trail off mid-clause.
 """
 
 
