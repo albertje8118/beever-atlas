@@ -89,6 +89,14 @@ def _has_min_decisions(n: int) -> SelectionPredicate:
     return lambda s: int(s.get("decision_count", 0)) >= n
 
 
+def _is_decision_archetype() -> SelectionPredicate:
+    """Eligible only when ``compute_signals`` derived ``archetype`` ==
+    "decision". Single-fact, decision-centered pages get the banner;
+    pages with one decision among many facts stay on the Topic
+    archetype and surface the decision via ``decision_log`` instead."""
+    return lambda s: str(s.get("archetype") or "").lower() == "decision"
+
+
 def _has_timeline(min_events: int, min_span_days: int) -> SelectionPredicate:
     def pred(s: dict[str, Any]) -> bool:
         return (
@@ -186,6 +194,13 @@ MODULE_CATALOG: dict[str, ModuleSpec] = {
         label="Summary",
         description="Bold TL;DR + 2-3 sentence overview + a compact stat strip showing critical / decision / open-question / tension counts. Always module #1 when fact_count ≥ 1.",
         eligible=_always_eligible_with_min_facts(1),
+        renderer_kind="frontend",
+    ),
+    "decision_banner": ModuleSpec(
+        id="decision_banner",
+        label="Decision",
+        description="Spotlight banner for single-decision topic pages — surfaces the chosen decision (capitalized headline + optional body), who decided, when, and (Phase 3) rationale / alternatives rejected / open consequences. Only fires when archetype == 'decision' (the page is centered on the decision, not just one decision among many facts).",
+        eligible=_is_decision_archetype(),
         renderer_kind="frontend",
     ),
     "key_facts": ModuleSpec(

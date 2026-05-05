@@ -140,6 +140,15 @@ def _extract_media_for_module(
         from beever_atlas.wiki.modules.stat_strip import build_stat_strip_data
 
         return build_stat_strip_data(render_inputs.get("facts") or [])
+    if module_id == "decision_banner":
+        from beever_atlas.wiki.modules.decision_banner import (
+            build_decision_banner_data,
+        )
+
+        return build_decision_banner_data(
+            render_inputs.get("facts") or [],
+            render_inputs.get("member_facts") or [],
+        )
 
     media = render_inputs.get("media") or []
     if not isinstance(media, list):

@@ -237,6 +237,30 @@ def compute_signals(
     else:
         numeric_fact_count = 0
 
+    # Archetype-detection placeholders — Phase 3 (extraction enrichment)
+    # will populate ``tension_count`` (conflict-typed facts) and
+    # ``person_fact_count`` (facts about a single person). For Phase 4
+    # prep we set them to 0 so the archetype derivation is total but
+    # only the ``decision`` archetype can fire today.
+    tension_count = 0
+    person_fact_count = 0
+    media_count = (
+        len(media_by_kind["hero_candidate"])
+        + len(media_by_kind["inline"])
+        + len(media_by_kind["gallery"])
+        + len(media_by_kind["link"])
+        + len(media_by_kind["pdf"])
+        + len(media_by_kind["video"])
+    )
+    archetype = _derive_archetype(
+        fact_count=fact_count,
+        decision_count=len(decisions),
+        tension_count=tension_count,
+        person_fact_count=person_fact_count,
+        media_count=media_count,
+        child_count=int(cluster.get("child_count", 0)),
+    )
+
     return {
         "title": cluster.get("title") or "",
         "fact_count": fact_count,
@@ -263,7 +287,72 @@ def compute_signals(
         "video_media_count": len(media_by_kind["video"]),
         "glossary_terms_used": glossary_terms_used,
         "numeric_fact_count": numeric_fact_count,
+        # Archetype-detection signals (Phase 4 prep). ``tension_count``
+        # and ``person_fact_count`` are placeholder zeros today; Phase 3
+        # extraction enrichment will populate them properly.
+        "tension_count": tension_count,
+        "person_fact_count": person_fact_count,
+        "archetype": archetype,
     }
+
+
+# ---------------------------------------------------------------------------
+# Archetype derivation — pure function over scalar signals so the result
+# is identical between the orchestrator (which feeds it to the prompt)
+# and the validator (which gates module eligibility on it).
+#
+# Decision threshold (``fact_count <= 8 AND decision_density >= 0.4``)
+# is intentionally narrow: pages with many facts of which only one is a
+# decision STAY as Topic — the single decision surfaces via
+# ``decision_log``. Pages CENTERED on a decision (the cluster IS the
+# decision) get the spotlight banner.
+#
+# Future archetypes (``tension``, ``person``, ``resource``, ``folder``)
+# are placeholders today — their gating signals always evaluate to 0
+# until Phase 3 lands. Adding the elif branches now keeps the routing
+# table ready for Phase 4 without touching this function again.
+# ---------------------------------------------------------------------------
+
+
+def _derive_archetype(
+    fact_count: int,
+    decision_count: int,
+    tension_count: int,
+    person_fact_count: int,
+    media_count: int,
+    child_count: int,
+) -> str:
+    """Classify the topic page into one of six archetypes.
+
+    Never raises — malformed inputs fall back to ``"topic"``. The
+    catalog's ``decision_banner`` predicate reads this via
+    ``signals["archetype"]``.
+    """
+    try:
+        fc = int(fact_count or 0)
+        dc = int(decision_count or 0)
+        tc = int(tension_count or 0)
+        pfc = int(person_fact_count or 0)
+        mc = int(media_count or 0)
+        cc = int(child_count or 0)
+    except (TypeError, ValueError):
+        return "topic"
+
+    # Decision: small page (≤8 facts) where the decision IS the
+    # centerpiece (decision_count / fact_count ≥ 0.4).
+    if dc >= 1 and fc <= 8 and (dc / max(fc, 1)) >= 0.4:
+        return "decision"
+    # Future archetypes — left as elif placeholders that never fire
+    # today (tension_count + person_fact_count are 0 until Phase 3).
+    if tc >= 1:
+        return "tension"
+    if pfc >= 8:
+        return "person"
+    if fc > 0 and (mc / max(fc, 1)) >= 0.6:
+        return "resource"
+    if cc >= 2:
+        return "folder"
+    return "topic"
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +449,7 @@ def _validate_plan(
 
 _HUMAN_RULES: dict[str, str] = {
     "hero_summary": "ALWAYS pick when fact_count ≥ 1. MUST be module #1 in your plan — the bold TL;DR + summary lead the page.",
+    "decision_banner": "Pick when archetype == 'decision' (signals.archetype). MUST be module #2 (right after hero_summary) for Decision-archetype pages — the page is centered on the decision, so it gets a spotlight banner instead of a buried key_facts row.",
     "key_facts": "Pick when fact_count ≥ 5.",
     "decision_log": "Pick when decision_count ≥ 1.",
     "timeline": "Pick when event_count ≥ 4 AND event_span_days ≥ 14.",

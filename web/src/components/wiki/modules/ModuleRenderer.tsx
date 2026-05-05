@@ -42,6 +42,7 @@ import { VideoEmbedModule } from "./VideoEmbedModule";
 import { ProvenanceDrawerModule } from "./ProvenanceDrawerModule";
 import { AcronymLegendModule } from "./AcronymLegendModule";
 import { StatStripModule } from "./StatStripModule";
+import { DecisionBannerModule } from "./DecisionBannerModule";
 
 export interface ModuleProps {
   module: WikiPageModule;
@@ -113,6 +114,8 @@ export function ModuleRenderer({
           // source data.
           case "stat_strip":
             return <StatStripModule key={module.anchor} {...props} />;
+          case "decision_banner":
+            return <DecisionBannerModule key={module.anchor} {...props} />;
           case "acronym_legend":
             return <AcronymLegendModule key={module.anchor} {...props} />;
           case "provenance_drawer":
