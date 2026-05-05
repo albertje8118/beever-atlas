@@ -78,6 +78,10 @@ def _extract_media_for_module(
     module_id: str,
     render_inputs: dict[str, Any],
     media_pins: list[Any],
+    *,
+    tldr: str = "",
+    overview: str = "",
+    signals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the structured ``data`` payload for a frontend-only module.
     Returns a dict with module-specific keys; the React component
@@ -107,6 +111,15 @@ def _extract_media_for_module(
         from beever_atlas.wiki.modules.key_facts import build_key_facts_data
 
         return build_key_facts_data(render_inputs.get("facts") or [])
+    if module_id == "hero_summary":
+        from beever_atlas.wiki.modules.hero_summary import build_hero_summary_data
+
+        return build_hero_summary_data(
+            tldr=tldr,
+            overview=overview,
+            signals=signals or {},
+            facts=render_inputs.get("facts") or [],
+        )
 
     media = render_inputs.get("media") or []
     if not isinstance(media, list):
@@ -486,7 +499,8 @@ async def compile_topic_page_modular(
         )
         return _fallback_output(title, render_inputs)
 
-    # Stage 3 — validate the plan.
+    # Stage 3 — validate the plan + parse the TL;DR + overview the
+    # planner LLM emitted (needed by Stage 4 for hero_summary).
     plan_dict = parsed.get("plan") or {}
     if not isinstance(plan_dict, dict):
         plan_dict = {}
@@ -494,6 +508,8 @@ async def compile_topic_page_modular(
     if plan.is_empty():
         logger.info("module_compile_plan_empty_fallback — using key_facts only")
         return _fallback_output(title, render_inputs)
+    tldr = str(parsed.get("tldr") or "").strip()
+    overview = str(parsed.get("overview") or "").strip()
 
     # Stage 4 — render each module deterministically + attach data
     # payload for the frontend dispatcher.
@@ -539,7 +555,12 @@ async def compile_topic_page_modular(
         spec = MODULE_CATALOG.get(mid)
         if spec and spec.renderer_kind == "frontend":
             entry["data"] = _extract_media_for_module(
-                mid, render_inputs, plan.media_pins
+                mid,
+                render_inputs,
+                plan.media_pins,
+                tldr=tldr,
+                overview=overview,
+                signals=signals,
             )
         else:
             # Markdown is intentionally persisted in BOTH ``page.content``
@@ -566,8 +587,8 @@ async def compile_topic_page_modular(
         fell_back = True
 
     # Stage 6 — assemble content from TL;DR + Overview + substituted body.
-    tldr = str(parsed.get("tldr") or "").strip()
-    overview = str(parsed.get("overview") or "").strip()
+    # tldr + overview were parsed in Stage 3 so hero_summary's data
+    # payload could read them.
     content = _assemble_content(tldr, overview, substituted_body)
     if not content:
         # Catastrophic fallback — produce something so the page isn't

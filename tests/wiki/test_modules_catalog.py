@@ -14,11 +14,12 @@ from beever_atlas.wiki.modules import (
 
 
 def test_catalog_has_all_documented_modules() -> None:
-    """The 17 module IDs declared in the spec MUST all exist in the
+    """The 18 module IDs declared in the spec MUST all exist in the
     catalog. Adding/removing modules requires updating the spec — this
     guard catches code-only drift."""
     expected = {
         # Content
+        "hero_summary",
         "key_facts",
         "decision_log",
         "timeline",
@@ -70,9 +71,10 @@ def test_list_module_ids_stable_order() -> None:
     by the planner prompt to render the vocabulary block — keeping
     a stable order means deterministic prompts."""
     ids = list_module_ids()
-    assert ids[0] == "key_facts"  # first in catalog
+    assert ids[0] == "hero_summary"  # first in catalog (always module #1)
+    assert ids[1] == "key_facts"  # second in catalog
     assert ids[-1] == "video_embed"  # last in catalog
-    assert len(ids) == 17
+    assert len(ids) == 18
 
 
 def test_eligible_predicates_handle_missing_signals() -> None:

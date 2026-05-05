@@ -75,6 +75,16 @@ def _has_min_facts(n: int) -> SelectionPredicate:
     return lambda s: int(s.get("fact_count", 0)) >= n
 
 
+def _always_eligible_with_min_facts(n: int) -> SelectionPredicate:
+    """Always-eligible variant gated only by a minimum fact count.
+
+    Used by ``hero_summary`` so every page with at least one fact
+    gets the summary header. The predicate is named distinctly so
+    the validator's logs can tell ``hero_summary`` rejections apart
+    from ``key_facts`` (which gates at fact_count ≥ 5)."""
+    return lambda s: int(s.get("fact_count", 0)) >= n
+
+
 def _has_min_decisions(n: int) -> SelectionPredicate:
     return lambda s: int(s.get("decision_count", 0)) >= n
 
@@ -163,6 +173,13 @@ def _has_video_media() -> SelectionPredicate:
 
 MODULE_CATALOG: dict[str, ModuleSpec] = {
     # ---- Content modules ----
+    "hero_summary": ModuleSpec(
+        id="hero_summary",
+        label="Summary",
+        description="Bold TL;DR + 2-3 sentence overview + a compact stat strip showing critical / decision / open-question / tension counts. Always module #1 when fact_count ≥ 1.",
+        eligible=_always_eligible_with_min_facts(1),
+        renderer_kind="frontend",
+    ),
     "key_facts": ModuleSpec(
         id="key_facts",
         label="Key Facts",

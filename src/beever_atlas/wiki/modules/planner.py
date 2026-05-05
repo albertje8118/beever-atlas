@@ -301,6 +301,7 @@ def _validate_plan(
 # ---------------------------------------------------------------------------
 
 _HUMAN_RULES: dict[str, str] = {
+    "hero_summary": "ALWAYS pick when fact_count ≥ 1. MUST be module #1 in your plan — the bold TL;DR + summary lead the page.",
     "key_facts": "Pick when fact_count ≥ 5.",
     "decision_log": "Pick when decision_count ≥ 1.",
     "timeline": "Pick when event_count ≥ 4 AND event_span_days ≥ 14.",

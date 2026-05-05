@@ -21,6 +21,7 @@
  */
 
 import type { WikiCitation, WikiPageModule } from "@/lib/types";
+import { HeroSummaryModule } from "./HeroSummaryModule";
 import { KeyFactsModule } from "./KeyFactsModule";
 import { DecisionLogModule } from "./DecisionLogModule";
 import { TimelineModule } from "./TimelineModule";
@@ -61,6 +62,8 @@ export function ModuleRenderer({
       {modules.map((module) => {
         const props: ModuleProps = { module, citations, onNavigate };
         switch (module.id) {
+          case "hero_summary":
+            return <HeroSummaryModule key={module.anchor} {...props} />;
           case "key_facts":
             return <KeyFactsModule key={module.anchor} {...props} />;
           case "decision_log":

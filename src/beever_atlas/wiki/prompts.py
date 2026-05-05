@@ -657,9 +657,10 @@ Return JSON ONLY with this exact shape:
 
 ## Module-selection rules
 
-- Pick **3 to 7 modules** total. Below 3 the page reads as a stub; above 7 it reads as a kitchen sink.
+- **HARD RULE — Module #1 in your plan MUST be `hero_summary` unless `fact_count` is 0.** The hero_summary frontend module reads your `tldr` and `overview` to render the page header (bold TL;DR + summary + stat strip). Skipping it leaves the page without a header.
+- Pick **3 to 7 modules** total (excluding `hero_summary`, which is always present). Below 3 content modules the page reads as a stub; above 7 it reads as a kitchen sink.
 - A module is ELIGIBLE only when its selection rule (in the catalog above) is satisfied. Do NOT pick a module whose rule is not met — the validator will drop it.
-- Order modules by reading priority: facts/decisions first, supporting visuals second, related/navigation last.
+- Order modules by reading priority: hero_summary first, then facts/decisions, then supporting visuals, then related/navigation last.
 - Anchors are lowercase + alphanumeric + dashes, ≤ 24 chars (e.g., `decision-log`, `related-threads`).
 - For media: pick AT MOST ONE `media_hero` per page. Pin `media_inline` items to a fact_id. Pool unpinned media into `media_gallery`.
 
