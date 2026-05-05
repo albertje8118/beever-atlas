@@ -9,27 +9,19 @@ import { CitationLink } from "./CitationLink";
 import { WikiLink } from "./WikiLink";
 import { buildLoaderUrl } from "@/lib/api";
 import { ProxiedImage } from "@/components/common/ProxiedImage";
+import { filesProxyPathFor } from "@/lib/mediaUrl";
 import type { WikiCitation } from "@/lib/types";
 
 /** Returns the route path needed to mint a signed loader token, or null
- * if the URL is public (no proxy needed).
+ * if the URL is public (no proxy needed). Detection lives in
+ * `lib/mediaUrl.ts` so MediaModal / wiki / entity-graph share one
+ * allowlist (Slack, Mattermost cloud + self-hosted, Discord CDN).
  *
- * Compares the parsed-URL hostname against the allowlist instead of
- * `url.includes("files.slack.com")` — substring matching against the full
- * URL would treat `evil.com/files.slack.com` as a Slack file and 404 on
- * the proxy with attacker-controlled bytes in the URL. CodeQL alert #20.
- */
+ * Hostname comparison is parsed-URL based, never substring — substring
+ * matching against the full URL would treat `evil.com/files.slack.com`
+ * as a Slack file. CodeQL alert #20. */
 function proxyPathFor(url: string): string | null {
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
-  if (host === "files.slack.com") {
-    return `/api/files/proxy?url=${encodeURIComponent(url)}`;
-  }
-  return null;
+  return filesProxyPathFor(url) ?? null;
 }
 
 /** Synchronous fallback (raw key) for `<a href>` / `<iframe src>` cases
@@ -41,10 +33,14 @@ function proxyUrl(url: string): string {
 }
 
 function detectMediaType(url: string, alt?: string): "image" | "pdf" | "video" | "link" {
-  const lower = (url + (alt || "")).toLowerCase();
+  const lower = (url + " " + (alt || "")).toLowerCase();
   if (lower.match(/\.(png|jpg|jpeg|gif|webp|svg)(\?|$)/)) return "image";
-  if (lower.match(/\.(pdf)(\?|$)/) || lower.includes("pdf")) return "pdf";
-  if (lower.match(/\.(mp4|mov|webm|avi)(\?|$)/) || lower.includes("video")) return "video";
+  // Prefer the alt-text emoji marker so backend renderers can hint
+  // the media kind even when the URL is opaque (Mattermost ID-only
+  // file URLs have no extension).
+  if ((alt || "").startsWith("📄") || lower.match(/\.(pdf)(\?|$)/) || lower.includes("pdf")) return "pdf";
+  if ((alt || "").startsWith("🎥") || lower.match(/\.(mp4|mov|webm|avi)(\?|$)/) || lower.includes("video") || lower.includes("youtube.com") || lower.includes("youtu.be") || lower.includes("vimeo.com")) return "video";
+  if ((alt || "").startsWith("🖼") || lower.includes("image")) return "image";
   return "link";
 }
 

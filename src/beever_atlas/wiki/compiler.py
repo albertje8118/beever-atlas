@@ -227,6 +227,67 @@ def _normalize_url(url: str) -> str:
         return url
 
 
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".heic")
+_VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v")
+_PDF_EXTS = (".pdf",)
+_DOC_EXTS = (".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".csv", ".md", ".txt", ".rtf")
+_VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "loom.com")
+
+
+def _derive_media_kind(url: str, name: str, fallback: str) -> str:
+    """Derive a stable media kind (``image``/``video``/``pdf``/``document``/``file``/``link``)
+    from URL and filename. Falls back to ``fallback`` when the upstream
+    persister did not record a specific MIME type.
+
+    Chat-platform attachments (Mattermost / Slack file URLs) often arrive
+    with no extension on the URL — `/api/v4/files/<id>` — so we prefer
+    the ``name`` field which carries the original filename. Without a
+    correct kind, downstream renderers can't decide between an
+    ``<img>``, ``<video>``, or PDF preview card.
+    """
+    fb = (fallback or "").lower().strip()
+    # Specific media kinds — trust upstream. ``"link"`` is intentionally
+    # NOT in this set: a YouTube URL the persister tagged as "link"
+    # should still be promoted to "video" so the VideoEmbedModule
+    # picks it up. The generic ``"link"`` fallback is preserved at the
+    # bottom of this function for URLs with no media signal.
+    if fb in {"image", "video", "pdf", "document", "doc"}:
+        return "document" if fb == "doc" else fb
+
+    n = (name or "").lower()
+    u = (url or "").lower()
+
+    def _matches(exts: tuple[str, ...]) -> bool:
+        # Check the filename suffix (most reliable signal — chat
+        # platforms strip extensions from the URL but keep the name)
+        # AND the URL path suffix, AND the URL with a `?query` after
+        # the extension. Three checks cover the realistic shapes:
+        #   logo.png                                     (name)
+        #   https://cdn.example/logo.png                 (url path)
+        #   https://cdn.example/logo.png?token=abc       (url + query)
+        return any(
+            n.endswith(ext) or u.endswith(ext) or f"{ext}?" in u
+            for ext in exts
+        )
+
+    if _matches(_IMAGE_EXTS):
+        return "image"
+    if _matches(_VIDEO_EXTS):
+        return "video"
+    if _matches(_PDF_EXTS):
+        return "pdf"
+    if _matches(_DOC_EXTS):
+        return "document"
+    if any(host in u for host in _VIDEO_HOSTS):
+        return "video"
+    # Preserve generic "link" tags from the persister when nothing
+    # more specific matched — distinguishes a shared URL from an
+    # uploaded file with an unknown extension.
+    if fb == "link":
+        return "link"
+    return "file"
+
+
 def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
     """Extract media references from facts for the LLM prompt."""
 
@@ -256,10 +317,15 @@ def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
                 if i < len(fact.source_media_names)
                 else url.split("/")[-1]
             )
+            kind = _derive_media_kind(url, name, fact.source_media_type or "")
             media.append(
                 {
                     "url": url,
-                    "type": fact.source_media_type or "file",
+                    "type": kind,
+                    # ``kind`` is the canonical field the modules orchestrator
+                    # reads (planner.py:148 falls back to ``type`` for
+                    # legacy callers — keep both in sync).
+                    "kind": kind,
                     "name": name,
                     "author": fact.author_name,
                     "context": _truncate_context(fact.memory_text),
@@ -271,10 +337,15 @@ def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
                 continue
             seen_urls.add(key)
             title = fact.source_link_titles[j] if j < len(fact.source_link_titles) else url
+            # Promote video-hosted links (YouTube, Vimeo, Loom) so the
+            # video module / inline embed picks them up instead of
+            # rendering a generic link card.
+            link_kind = "video" if any(host in url.lower() for host in _VIDEO_HOSTS) else "link"
             media.append(
                 {
                     "url": url,
-                    "type": "link",
+                    "type": link_kind,
+                    "kind": link_kind,
                     "name": title,
                     "author": fact.author_name,
                     "context": _truncate_context(fact.memory_text),
@@ -432,7 +503,13 @@ def _assemble_resources_markdown(media_data: list[dict]) -> str:
             name = item.get("name", "")
             ctx = _ctx(item.get("context", ""), 120)
             url = item.get("url", "")
-            doc_lines.append(f"\n**{name}** — {ctx} [Download]({url})")
+            # Leading 📄 + the word "PDF" in the link text ensure the
+            # frontend `detectMediaType` returns ``"pdf"`` even when the
+            # URL is opaque (Mattermost ``/api/v4/files/<id>`` URLs have
+            # no extension). The marker also triggers the expandable
+            # WikiPdfLink card in WikiMarkdown.
+            link_text = f"📄 PDF — {name}" if name else "📄 PDF document"
+            doc_lines.append(f"\n**{name}** — {ctx} [{link_text}]({url})")
         sections.append("\n".join(doc_lines))
 
     if links:
@@ -449,7 +526,12 @@ def _assemble_resources_markdown(media_data: list[dict]) -> str:
         for item in videos:
             desc = _ctx(item.get("context", ""), 120) or item.get("name", "")
             url = item.get("url", "")
-            vid_lines.append(f"\n**{desc}** [Watch]({url})")
+            # Leading 🎥 + the word "video" in the link text ensure the
+            # frontend `detectMediaType` returns ``"video"`` even when
+            # the URL is opaque. Without this, the renderer falls back
+            # to a plain text link instead of an embedded ``<video>``
+            # element.
+            vid_lines.append(f"\n**{desc}** [🎥 Watch video]({url})")
         sections.append("\n".join(vid_lines))
 
     return "\n\n".join(sections) + "\n"
