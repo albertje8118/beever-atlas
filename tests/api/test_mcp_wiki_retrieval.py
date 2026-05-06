@@ -819,6 +819,10 @@ async def test_read_wiki_section_returns_section_payload(
     assert result["heading"] == "Alternatives rejected"
     assert result["page_slug"] == "topic-auth"
     assert result["citations"] == ["f_2"]
+    # M-5 schema parity — agents can attribute the section without a
+    # separate read_wiki_page call.
+    assert result["channel_id"] == "C1"
+    assert "page_title" in result  # populated from the page's title field
 
 
 async def test_read_wiki_section_returns_section_not_found_with_available(

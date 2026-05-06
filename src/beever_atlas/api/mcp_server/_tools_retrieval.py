@@ -1275,10 +1275,13 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
 
         Saves tokens for agents that only need a slice of a wiki article.
         Returns ``{anchor, heading, paragraphs, citations, visual,
-        page_slug}`` on hit. Use this instead of ``read_wiki_page`` when
-        you know the section anchor; use ``read_wiki_module`` for ONE
-        module's structured payload (key_facts, decision_log, etc.);
-        use ``find_facts`` for fact-text search across pages.
+        page_slug, page_title, channel_id}`` on hit — ``page_title`` and
+        ``channel_id`` are included so the agent can render attribution
+        without a separate ``read_wiki_page`` call. Use this instead of
+        ``read_wiki_page`` when you know the section anchor; use
+        ``read_wiki_module`` for ONE module's structured payload
+        (key_facts, decision_log, etc.); use ``find_facts`` for
+        fact-text search across pages.
 
         Returns ``{error: "page_not_found", channel_id, page_slug}`` when
         the page does not exist; ``{error: "section_not_found",
@@ -1349,6 +1352,10 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
                         "citations": list(section.get("citations") or []),
                         "visual": section.get("visual"),
                         "page_slug": page_slug,
+                        # M-5: schema parity — agents can attribute the
+                        # section without a separate read_wiki_page call.
+                        "page_title": str(getattr(page, "title", "") or ""),
+                        "channel_id": channel_id,
                     }
             return {
                 "error": "section_not_found",
