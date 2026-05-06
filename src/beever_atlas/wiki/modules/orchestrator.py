@@ -565,6 +565,191 @@ def _mermaid_block_has_no_edges(rendered: str) -> bool:
     return "-->" not in inner
 
 
+# ---------------------------------------------------------------------------
+# Body post-substitution cleanup — strips noisy / empty Mermaid blocks
+# and empty frontend-only module headers from the substituted body so
+# the markdown export does not show graphs / sections that the live
+# render path silently suppressed (P3 + P4).
+# ---------------------------------------------------------------------------
+
+
+def _analyze_mermaid_block(inner: str) -> tuple[int, int, int]:
+    """Return ``(total_edges, distinct_verbs, max_pair_edges)`` for a
+    Mermaid block body.
+
+    ``total_edges`` counts ``-->`` directives. ``distinct_verbs`` counts
+    distinct labels emitted with the ``-->|label|`` syntax (zero when
+    no labels are present). ``max_pair_edges`` is the maximum count of
+    edges sharing the same source/target pair, used to detect "one
+    dominant pair with many synonymous verbs" noise patterns the body-
+    level prompt is prone to emit.
+    """
+    edges: list[tuple[str, str, str]] = []
+    # Loose grammar — mermaid edges can be ``A --> B`` or ``A -->|verb| B``
+    # with an optional label. We don't validate the source / target
+    # tokens; any non-whitespace run before / after the arrow counts as
+    # a node id for grouping purposes.
+    edge_re = re.compile(
+        r"([A-Za-z0-9_]+)\s*-->(?:\s*\|([^|]*)\|)?\s*([A-Za-z0-9_]+)"
+    )
+    for match in edge_re.finditer(inner):
+        src = match.group(1) or ""
+        verb = (match.group(2) or "").strip()
+        tgt = match.group(3) or ""
+        edges.append((src, verb, tgt))
+
+    total_edges = len(edges)
+    distinct_verbs = len({v for _, v, _ in edges if v})
+    pair_counts: dict[tuple[str, str], int] = {}
+    for src, _verb, tgt in edges:
+        key = (src, tgt)
+        pair_counts[key] = pair_counts.get(key, 0) + 1
+    max_pair_edges = max(pair_counts.values(), default=0)
+    return total_edges, distinct_verbs, max_pair_edges
+
+
+def _strip_noisy_body_mermaid(
+    body: str,
+    *,
+    page_id: str = "<unknown>",
+) -> str:
+    """Post-substitution: scan the body markdown for ```mermaid``` blocks
+    and strip the entire block when the graph is noisy.
+
+    Noisy = one of:
+      - ``total_edges == 0`` (empty / structureless block)
+      - ``max_pair_edges > 5 AND distinct_verbs <= 1`` (one dominant
+        pair with synonymous verbs — e.g. USES + INVESTIGATES + OBSERVES
+        between the same nodes)
+
+    Mirrors the ``entity_diagram`` MODULE-level suppression rule
+    (``_suppress_thin_modules`` rule 1) so body-level Mermaid blocks
+    that bypass module suppression get the same treatment. Logs
+    structured telemetry for every drop so soak runs can compare drop
+    rates module-suppress vs body-suppress.
+    """
+    if not isinstance(body, str) or "```mermaid" not in body:
+        return body
+
+    out_parts: list[str] = []
+    cursor = 0
+    for match in _MERMAID_BLOCK_RE.finditer(body):
+        inner = match.group(1)
+        total_edges, distinct_verbs, max_pair_edges = _analyze_mermaid_block(inner)
+        is_noisy = total_edges == 0 or (
+            max_pair_edges > 5 and distinct_verbs <= 1
+        )
+        if not is_noisy:
+            continue
+        # Emit pre-block content + drop the whole fenced block. Telemetry
+        # carries enough signal to diagnose why we dropped it without
+        # re-reading the page.
+        reason = "no_edges" if total_edges == 0 else "dominant_pair_one_verb"
+        logger.info(
+            "body_mermaid_suppressed reason=%s page_id=%s "
+            "total_edges=%d distinct_verbs=%d max_pair_edges=%d",
+            reason,
+            page_id,
+            total_edges,
+            distinct_verbs,
+            max_pair_edges,
+        )
+        out_parts.append(body[cursor:match.start()])
+        cursor = match.end()
+    if cursor == 0:
+        # No noisy block fired — return original body unchanged so we
+        # don't subtly perturb formatting (whitespace, etc.).
+        return body
+    out_parts.append(body[cursor:])
+    # Collapse any triple+ newlines the block removal may have created.
+    cleaned = "".join(out_parts)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+# Frontend-only module section headers the v3 prompt is told to leave
+# in the body but whose modules are rendered by the React dispatcher
+# (NOT by marker substitution). When a frontend-only module's header
+# is present in the body but not followed by content, the export shows
+# an empty section header — strip them defensively.
+_FRONTEND_ONLY_HEADERS: tuple[str, ...] = (
+    "Terms Used",
+    "Source Messages",
+    "Sources Used",
+    "Reading aids",
+    "Reading Aids",
+    "Glossary",
+    "Hero",
+    "Inline media",
+    "Linked resource",
+    "Document",
+    "Video",
+    "Gallery",
+)
+
+
+def _strip_empty_frontend_section_headers(
+    body: str,
+    *,
+    page_id: str = "<unknown>",
+) -> str:
+    """Post-substitution: drop frontend-only module section headers
+    whose body is empty (only whitespace) before the next ``###`` /
+    ``##`` heading or end-of-content.
+
+    Limited to the known list of frontend-rendered module labels so we
+    don't accidentally strip legitimate empty sections that happen to
+    have the same heading text.
+    """
+    if not isinstance(body, str) or "###" not in body:
+        return body
+
+    lines = body.split("\n")
+    out_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        # Match ``### {label}`` (level-3 heading). Leading whitespace OK.
+        if stripped.startswith("###"):
+            label = stripped.lstrip("#").strip()
+            if label in _FRONTEND_ONLY_HEADERS:
+                # Look ahead — until we hit another heading (## / ###),
+                # a horizontal rule, or end-of-content. If the lookahead
+                # window contains only whitespace, drop the header.
+                j = i + 1
+                has_content = False
+                while j < len(lines):
+                    nxt = lines[j].strip()
+                    if (
+                        nxt.startswith("###")
+                        or nxt.startswith("## ")
+                        or nxt == "##"
+                        or nxt.startswith("---")
+                    ):
+                        break
+                    if nxt:
+                        has_content = True
+                        break
+                    j += 1
+                if not has_content:
+                    logger.info(
+                        "body_empty_section_stripped section=%r page_id=%s",
+                        label,
+                        page_id,
+                    )
+                    # Skip the heading line + any pure-whitespace lines
+                    # up to the next heading / hr.
+                    i = j
+                    continue
+        out_lines.append(line)
+        i += 1
+    cleaned = "\n".join(out_lines)
+    # Collapse any triple+ newlines created by removing a header.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
 def _suppress_empty_mermaid_modules(
     plan: ModulePlan,
     rendered_modules: dict[str, str],
@@ -937,6 +1122,19 @@ async def compile_topic_page_modular(
         logger.warning("module_substitution_failed exc=%s", exc)
         substituted_body = ""
         fell_back = True
+
+    # P3 + P4 — post-substitution body cleanup. Strip noisy / empty
+    # ``mermaid`` blocks (entity_diagram-style noise that bypassed the
+    # module-level suppression) and frontend-module section headers
+    # that the LLM left in the body but whose content is rendered by
+    # the React dispatcher (so they appear empty in markdown).
+    page_id_for_cleanup = str(render_inputs.get("page_id") or "<unknown>")
+    substituted_body = _strip_noisy_body_mermaid(
+        substituted_body, page_id=page_id_for_cleanup
+    )
+    substituted_body = _strip_empty_frontend_section_headers(
+        substituted_body, page_id=page_id_for_cleanup
+    )
 
     # Stage 6 — assemble content from TL;DR + Overview + substituted body.
     # tldr + overview were parsed in Stage 3 so hero_summary's data

@@ -182,6 +182,10 @@ async def download_wiki_markdown(
             page_order.append(child["id"])
 
     # Assemble Markdown
+    from beever_atlas.wiki.modules.narrative_markdown import (
+        narrative_sections_to_markdown,
+    )
+
     parts: list[str] = [f"# {channel_name} — Wiki\n"]
     for page_id in page_order:
         page = pages_dict.get(page_id)
@@ -191,6 +195,20 @@ async def download_wiki_markdown(
         section = page.get("section_number", "")
         prefix = f"{section} " if section else ""
         parts.append(f"\n---\n\n## {prefix}{title}\n")
+        # ``narrative_sections`` is the structured spotlight body — render
+        # it BEFORE the legacy module-substituted content so the export
+        # matches what the user sees on the rendered page (article first,
+        # then Reference & Evidence appendix). Pages without a narrative
+        # payload skip this branch and the export carries only the legacy
+        # content as before (backward compat).
+        narrative_md = narrative_sections_to_markdown(
+            page.get("narrative_sections") or []
+        )
+        if narrative_md:
+            parts.append(narrative_md)
+            # Separator between the narrative article and the Reference
+            # & Evidence (legacy modules) section, mirroring the live UI.
+            parts.append("\n---\n")
         parts.append(page.get("content", ""))
         # Append citations. Each citation may or may not have a
         # permalink — earlier extractions sometimes lacked thread

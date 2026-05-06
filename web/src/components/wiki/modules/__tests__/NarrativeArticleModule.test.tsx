@@ -800,6 +800,164 @@ describe("NarrativeArticleModule — inline citation parser", () => {
 });
 
 // ---------------------------------------------------------------------------
+// P1: Inline citation chips inside visual content (list/table/callout/blockquote)
+// ---------------------------------------------------------------------------
+//
+// The inline citation parser (`renderParagraphWithInlineCitations`) had been
+// applied only to paragraph text. Visual content rendering (list items, table
+// cells, callout body, blockquote text) leaked literal `[f_xxx]` patterns.
+// These tests pin the new behavior: text inside list/table/callout/blockquote
+// runs through the citation parser, while `code` visuals are exempt (code is
+// preserved verbatim).
+
+describe("NarrativeArticleModule — citation chips inside visual content (P1)", () => {
+  it("renders citation chips inside list items", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "list",
+            heading: "Steps",
+            paragraphs: [{ text: "See list.", citations: ["f_5", "f_7"] }],
+            visual: {
+              kind: "list",
+              content: {
+                items: ["First item [f_5]", "Second item [f_7]"],
+                ordered: false,
+              },
+            },
+          },
+        ])}
+        citations={[makeCitation("f_5"), makeCitation("f_7")]}
+        onNavigate={noop}
+      />,
+    );
+    const list = screen.getByTestId("narrative-visual-list");
+    // Each list-item carries a citation chip rendered in-place.
+    const chips = list.querySelectorAll('[data-testid="narrative-citation-chip"]');
+    expect(chips.length).toBe(2);
+    expect(chips[0].getAttribute("data-fact-id")).toBe("f_5");
+    expect(chips[1].getAttribute("data-fact-id")).toBe("f_7");
+    // Literal `[f_xxx]` markers must not survive in the rendered text.
+    const text = list.textContent || "";
+    expect(text).not.toContain("[f_5]");
+    expect(text).not.toContain("[f_7]");
+    expect(text).toContain("First item ");
+    expect(text).toContain("Second item ");
+  });
+
+  it("renders citation chips inside table cells", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "tab",
+            heading: "Compare",
+            paragraphs: [{ text: "Table.", citations: ["f_3"] }],
+            visual: {
+              kind: "table",
+              content: {
+                headers: ["Option", "Notes"],
+                rows: [
+                  ["JWT", "lower cost [f_3]"],
+                  ["SAML", "high effort"],
+                ],
+              },
+            },
+          },
+        ])}
+        citations={[makeCitation("f_3")]}
+        onNavigate={noop}
+      />,
+    );
+    const table = screen.getByTestId("narrative-visual-table");
+    const chips = table.querySelectorAll('[data-testid="narrative-citation-chip"]');
+    expect(chips.length).toBe(1);
+    expect(chips[0].getAttribute("data-fact-id")).toBe("f_3");
+    expect(table.textContent || "").not.toContain("[f_3]");
+  });
+
+  it("renders citation chips inside callout text", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "warn",
+            heading: "Warn",
+            paragraphs: [{ text: "Callout.", citations: ["f_4"] }],
+            visual: {
+              kind: "callout",
+              content: { variant: "warning", text: "Watch the budget [f_4]." },
+            },
+          },
+        ])}
+        citations={[makeCitation("f_4")]}
+        onNavigate={noop}
+      />,
+    );
+    const callout = screen.getByTestId("narrative-visual-callout");
+    const chip = callout.querySelector('[data-testid="narrative-citation-chip"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute("data-fact-id")).toBe("f_4");
+    expect(callout.textContent || "").not.toContain("[f_4]");
+    expect(callout.textContent || "").toContain("Watch the budget ");
+  });
+
+  it("renders citation chips inside blockquote text", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "quote",
+            heading: "Voice",
+            paragraphs: [{ text: "Quote.", citations: ["f_2"] }],
+            visual: {
+              kind: "blockquote",
+              content: { content: "Ship it now [f_2].", attribution: "Eng" },
+            },
+          },
+        ])}
+        citations={[makeCitation("f_2")]}
+        onNavigate={noop}
+      />,
+    );
+    const quote = screen.getByTestId("narrative-visual-blockquote");
+    const chip = quote.querySelector('[data-testid="narrative-citation-chip"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute("data-fact-id")).toBe("f_2");
+    expect(quote.textContent || "").not.toContain("[f_2]");
+  });
+
+  it("does NOT parse citation markers inside code visuals (verbatim contract)", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "code",
+            heading: "Snippet",
+            paragraphs: [{ text: "See code.", citations: ["f_x"] }],
+            visual: {
+              kind: "code",
+              content: {
+                language: "python",
+                code: "# refers to [f_x]\nprint('hi')",
+              },
+            },
+          },
+        ])}
+        citations={[makeCitation("f_x")]}
+        onNavigate={noop}
+      />,
+    );
+    const pre = screen.getByTestId("narrative-visual-code");
+    // The literal `[f_x]` must remain in the rendered code (verbatim).
+    expect(pre.textContent || "").toContain("[f_x]");
+    // No chips inside the code block.
+    expect(pre.querySelectorAll('[data-testid="narrative-citation-chip"]').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // M-3: missing fact_id chip — dev-only [?] fallback (defensive guard)
 // ---------------------------------------------------------------------------
 //

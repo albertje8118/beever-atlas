@@ -19,7 +19,6 @@ import { Fragment, type ReactNode } from "react";
 import type { WikiCitation } from "@/lib/types";
 import type { ModuleProps } from "./ModuleRenderer";
 import { MermaidBlock } from "../MermaidBlock";
-import { CalloutBox } from "../CalloutBox";
 
 // ---------------------------------------------------------------------------
 // Data shape
@@ -278,9 +277,29 @@ function CitationChip({ factId, displayIndex, citation }: CitationChipProps) {
 
 interface VisualBlockProps {
   visual: NarrativeVisual;
+  factIdIndex: Map<string, number>;
+  citationLookup: Map<string, WikiCitation>;
 }
 
-function VisualBlock({ visual }: VisualBlockProps) {
+/** Wrap ``renderParagraphWithInlineCitations`` for use inside visual
+ *  content (list items, table cells, callout/blockquote text). Returns
+ *  the interleaved ReactNode array so each call site can splat it
+ *  directly into JSX. Code blocks intentionally bypass this — code is
+ *  preserved verbatim so any ``[f_xxx]`` inside the snippet survives. */
+function renderTextWithInlineCitations(
+  text: string,
+  factIdIndex: Map<string, number>,
+  citationLookup: Map<string, WikiCitation>,
+): ReactNode[] {
+  const { nodes } = renderParagraphWithInlineCitations(
+    text,
+    factIdIndex,
+    citationLookup,
+  );
+  return nodes;
+}
+
+function VisualBlock({ visual, factIdIndex, citationLookup }: VisualBlockProps) {
   switch (visual.kind) {
     case "table": {
       const content = visual.content as
@@ -311,7 +330,11 @@ function VisualBlock({ visual }: VisualBlockProps) {
                     scope="col"
                     className="text-left font-semibold px-3 py-2 text-foreground"
                   >
-                    {h}
+                    {renderTextWithInlineCitations(h, factIdIndex, citationLookup).map(
+                      (node, ni) => (
+                        <Fragment key={ni}>{node}</Fragment>
+                      ),
+                    )}
                   </th>
                 ))}
               </tr>
@@ -324,7 +347,13 @@ function VisualBlock({ visual }: VisualBlockProps) {
                       key={ci}
                       className="px-3 py-2 text-muted-foreground align-top"
                     >
-                      {cell}
+                      {renderTextWithInlineCitations(
+                        cell,
+                        factIdIndex,
+                        citationLookup,
+                      ).map((node, ni) => (
+                        <Fragment key={ni}>{node}</Fragment>
+                      ))}
                     </td>
                   ))}
                 </tr>
@@ -362,7 +391,11 @@ function VisualBlock({ visual }: VisualBlockProps) {
         >
           {items.map((item, i) => (
             <li key={i} className="leading-relaxed">
-              {item}
+              {renderTextWithInlineCitations(item, factIdIndex, citationLookup).map(
+                (node, ni) => (
+                  <Fragment key={ni}>{node}</Fragment>
+                ),
+              )}
             </li>
           ))}
         </ListTag>
@@ -406,9 +439,47 @@ function VisualBlock({ visual }: VisualBlockProps) {
             ? content.content
             : "";
       if (!text) return null;
+      const calloutNodes = renderTextWithInlineCitations(
+        text,
+        factIdIndex,
+        citationLookup,
+      );
+      // Inline the CalloutBox styles here so the body can carry the
+      // interleaved citation chips. ``CalloutBox`` accepts only a
+      // string ``content`` prop today; copying the per-variant style
+      // map keeps that contract intact while letting visual content
+      // citations render in-place inside the callout body.
+      const calloutStyles: Record<
+        "note" | "tip" | "warning",
+        { container: string; text: string; label: string }
+      > = {
+        note: {
+          container: "bg-blue-500/10 border-blue-500/30",
+          text: "text-blue-400",
+          label: "Note",
+        },
+        tip: {
+          container: "bg-emerald-500/10 border-emerald-500/30",
+          text: "text-emerald-400",
+          label: "Tip",
+        },
+        warning: {
+          container: "bg-amber-500/10 border-amber-500/30",
+          text: "text-amber-400",
+          label: "Warning",
+        },
+      };
+      const cs = calloutStyles[type];
       return (
         <div data-testid="narrative-visual-callout">
-          <CalloutBox type={type} content={text} />
+          <div className={`my-3 rounded-lg border ${cs.container} p-4`}>
+            <p className={`text-sm font-semibold ${cs.text}`}>{cs.label}</p>
+            <p className={`mt-1 text-sm ${cs.text} opacity-90`}>
+              {calloutNodes.map((node, ni) => (
+                <Fragment key={ni}>{node}</Fragment>
+              ))}
+            </p>
+          </div>
         </div>
       );
     }
@@ -466,7 +537,13 @@ function VisualBlock({ visual }: VisualBlockProps) {
           data-testid="narrative-visual-blockquote"
           className="my-4 border-l-4 border-muted pl-4 italic text-muted-foreground"
         >
-          <p className="text-sm leading-relaxed">{text}</p>
+          <p className="text-sm leading-relaxed">
+            {renderTextWithInlineCitations(text, factIdIndex, citationLookup).map(
+              (node, ni) => (
+                <Fragment key={ni}>{node}</Fragment>
+              ),
+            )}
+          </p>
           {attribution && (
             <footer className="mt-1 text-xs not-italic text-muted-foreground/70">
               — {attribution}
@@ -737,7 +814,13 @@ export function NarrativeArticleModule({ module, citations }: ModuleProps) {
               />
             ))}
           </div>
-          {section.visual && <VisualBlock visual={section.visual} />}
+          {section.visual && (
+            <VisualBlock
+              visual={section.visual}
+              factIdIndex={factIdIndex}
+              citationLookup={citationLookup}
+            />
+          )}
         </section>
       ))}
     </article>
