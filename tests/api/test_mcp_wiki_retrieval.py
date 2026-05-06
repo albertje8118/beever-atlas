@@ -62,6 +62,7 @@ def _wiki_page(
     title: str = "Authentication",
     last_facts_seen: list[str] | None = None,
     modules: list[dict[str, Any]] | None = None,
+    narrative_sections: list[dict[str, Any]] | None = None,
 ):
     from beever_atlas.models.persistence import WikiPage, WikiPageSection
 
@@ -75,6 +76,7 @@ def _wiki_page(
         sections=[WikiPageSection(id="overview", title="Overview", content_md="x")],
         last_facts_seen=list(last_facts_seen or []),
         modules=list(modules or []),
+        narrative_sections=list(narrative_sections or []),
         version=2,
         updated_at=datetime(2026, 5, 1, tzinfo=UTC),
     )
@@ -750,3 +752,237 @@ async def test_round6_tools_reject_missing_principal(
     ]:
         out = await registered_tools[name](ctx=ctx, **args)
         assert out == [], f"{name} did not gate on missing principal"
+
+
+# ---------------------------------------------------------------------------
+# read_wiki_section (wiki-narrative-articles)
+# ---------------------------------------------------------------------------
+
+
+def _section(
+    *,
+    anchor: str = "context",
+    heading: str = "Context",
+    paragraphs: list[dict] | None = None,
+    citations: list[str] | None = None,
+    visual: dict | None = None,
+) -> dict:
+    return {
+        "anchor": anchor,
+        "heading": heading,
+        "paragraphs": list(paragraphs or [
+            {"text": "The team adopted Authlib.", "citations": ["f_1"], "is_inference": False},
+        ]),
+        "citations": list(citations or ["f_1"]),
+        "visual": visual,
+        "citation_coverage": 1.0,
+    }
+
+
+async def test_read_wiki_section_returns_section_payload(
+    registered_tools, monkeypatch
+) -> None:
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    page = _wiki_page(
+        narrative_sections=[
+            _section(anchor="context", heading="Context"),
+            _section(
+                anchor="alternatives",
+                heading="Alternatives rejected",
+                paragraphs=[
+                    {"text": "FastAPI was considered.", "citations": ["f_2"], "is_inference": False},
+                ],
+                citations=["f_2"],
+            ),
+        ],
+    )
+    fake_store = AsyncMock()
+    fake_store.get_page_by_slug = AsyncMock(return_value=page)
+    with (
+        patch(
+            "beever_atlas.infra.channel_access.assert_channel_access",
+            new=AsyncMock(),
+        ),
+        patch("beever_atlas.stores.get_stores", return_value=_stores()),
+        patch(
+            "beever_atlas.wiki.page_store.WikiPageStore",
+            return_value=fake_store,
+        ),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="topic-auth",
+            anchor="alternatives",
+            ctx=_make_ctx(),
+        )
+    assert result["anchor"] == "alternatives"
+    assert result["heading"] == "Alternatives rejected"
+    assert result["page_slug"] == "topic-auth"
+    assert result["citations"] == ["f_2"]
+
+
+async def test_read_wiki_section_returns_section_not_found_with_available(
+    registered_tools, monkeypatch
+) -> None:
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    page = _wiki_page(
+        narrative_sections=[
+            _section(anchor="context"),
+            _section(anchor="implications", heading="Implications"),
+        ],
+    )
+    fake_store = AsyncMock()
+    fake_store.get_page_by_slug = AsyncMock(return_value=page)
+    with (
+        patch(
+            "beever_atlas.infra.channel_access.assert_channel_access",
+            new=AsyncMock(),
+        ),
+        patch("beever_atlas.stores.get_stores", return_value=_stores()),
+        patch(
+            "beever_atlas.wiki.page_store.WikiPageStore",
+            return_value=fake_store,
+        ),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="topic-auth",
+            anchor="ghost-anchor",
+            ctx=_make_ctx(),
+        )
+    assert result["error"] == "section_not_found"
+    assert result["page_slug"] == "topic-auth"
+    assert sorted(result["available_anchors"]) == ["context", "implications"]
+
+
+async def test_read_wiki_section_returns_narrative_not_available_when_empty(
+    registered_tools, monkeypatch
+) -> None:
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    page = _wiki_page(
+        narrative_sections=[],
+        modules=[{"id": "key_facts", "anchor": "kf", "data": {}}],
+    )
+    fake_store = AsyncMock()
+    fake_store.get_page_by_slug = AsyncMock(return_value=page)
+    with (
+        patch(
+            "beever_atlas.infra.channel_access.assert_channel_access",
+            new=AsyncMock(),
+        ),
+        patch("beever_atlas.stores.get_stores", return_value=_stores()),
+        patch(
+            "beever_atlas.wiki.page_store.WikiPageStore",
+            return_value=fake_store,
+        ),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="topic-auth",
+            anchor="context",
+            ctx=_make_ctx(),
+        )
+    assert result["error"] == "narrative_not_available"
+    assert result["page_slug"] == "topic-auth"
+    assert result["has_modules"] is True
+    assert "read_wiki_page" in result.get("suggestion", "")
+
+
+async def test_read_wiki_section_returns_page_not_found(
+    registered_tools, monkeypatch
+) -> None:
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    fake_store = AsyncMock()
+    fake_store.get_page_by_slug = AsyncMock(return_value=None)
+    with (
+        patch(
+            "beever_atlas.infra.channel_access.assert_channel_access",
+            new=AsyncMock(),
+        ),
+        patch("beever_atlas.stores.get_stores", return_value=_stores()),
+        patch(
+            "beever_atlas.wiki.page_store.WikiPageStore",
+            return_value=fake_store,
+        ),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="missing-page",
+            anchor="context",
+            ctx=_make_ctx(),
+        )
+    assert result == {
+        "error": "page_not_found",
+        "channel_id": "C1",
+        "page_slug": "missing-page",
+    }
+
+
+async def test_read_wiki_section_denies_unauthorized_channel(
+    registered_tools, monkeypatch
+) -> None:
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    with patch(
+        "beever_atlas.infra.channel_access.assert_channel_access",
+        new=AsyncMock(side_effect=PermissionError("denied")),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="topic-auth",
+            anchor="context",
+            ctx=_make_ctx(),
+        )
+    assert result == {"error": "channel_access_denied", "channel_id": "C1"}
+
+
+async def test_read_wiki_section_schema_parity_with_persistence(
+    registered_tools, monkeypatch
+) -> None:
+    """Section payload returned by read_wiki_section matches the
+    persisted section structure exactly — same field names, same types.
+
+    Verifies the spec requirement "Section data shape consistency with
+    page-store" — agents see identical shapes whether they fetch via
+    read_wiki_page (extracting from full page) or read_wiki_section.
+    """
+    _patch_principal(monkeypatch, "mcp:agent-1")
+    persisted_section = _section(
+        anchor="alternatives",
+        heading="Alternatives rejected",
+        paragraphs=[
+            {
+                "text": "FastAPI was considered but rejected.",
+                "citations": ["f_2", "f_3"],
+                "is_inference": False,
+            },
+        ],
+        citations=["f_2", "f_3"],
+        visual={"kind": "table", "content": {"headers": ["A"], "rows": [["1"]]}},
+    )
+    page = _wiki_page(narrative_sections=[persisted_section])
+    fake_store = AsyncMock()
+    fake_store.get_page_by_slug = AsyncMock(return_value=page)
+    with (
+        patch(
+            "beever_atlas.infra.channel_access.assert_channel_access",
+            new=AsyncMock(),
+        ),
+        patch("beever_atlas.stores.get_stores", return_value=_stores()),
+        patch(
+            "beever_atlas.wiki.page_store.WikiPageStore",
+            return_value=fake_store,
+        ),
+    ):
+        result = await registered_tools["read_wiki_section"](
+            channel_id="C1",
+            page_slug="topic-auth",
+            anchor="alternatives",
+            ctx=_make_ctx(),
+        )
+    # Field equivalence: every persisted-section field surfaces under
+    # the same name on the tool response.
+    assert result["anchor"] == persisted_section["anchor"]
+    assert result["heading"] == persisted_section["heading"]
+    assert result["paragraphs"] == persisted_section["paragraphs"]
+    assert result["citations"] == persisted_section["citations"]
+    assert result["visual"] == persisted_section["visual"]

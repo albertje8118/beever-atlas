@@ -1255,6 +1255,116 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
             )
             return []
 
+    @mcp.tool(name="read_wiki_section")
+    async def read_wiki_section(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        page_slug: Annotated[
+            str,
+            "The slug of the wiki page that hosts the narrative section",
+        ],
+        anchor: Annotated[
+            str,
+            "The narrative section anchor — kebab-case in-page id "
+            "(e.g. 'context', 'alternatives', 'implications')",
+        ],
+        ctx: Context,
+        target_lang: Annotated[str, "Target language tag (BCP-47)"] = "en",
+    ) -> dict:
+        """Fetch ONE narrative section's structured data without loading
+        the full page.
+
+        Saves tokens for agents that only need a slice of a wiki article.
+        Returns ``{anchor, heading, paragraphs, citations, visual,
+        page_slug}`` on hit. Use this instead of ``read_wiki_page`` when
+        you know the section anchor; use ``read_wiki_module`` for ONE
+        module's structured payload (key_facts, decision_log, etc.);
+        use ``find_facts`` for fact-text search across pages.
+
+        Returns ``{error: "page_not_found", channel_id, page_slug}`` when
+        the page does not exist; ``{error: "section_not_found",
+        page_slug, available_anchors: [...]}`` when the page exists but
+        the anchor is missing; ``{error: "narrative_not_available",
+        page_slug, has_modules: bool, suggestion: ...}`` when the page
+        predates narrative generation OR fell back due to validation
+        failure (callers can retry with ``read_wiki_page`` for module-
+        only data); ``{error: "channel_access_denied"}`` on ACL denial.
+
+        Spec:
+        ``openspec/changes/wiki-narrative-articles/specs/mcp-redesign-tools/``.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = (
+            _validate_id(channel_id, "channel_id")
+            or _validate_id(page_slug, "page_slug")
+            or _validate_id(anchor, "anchor")
+        )
+        if err:
+            return err
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return {"error": "channel_access_denied", "channel_id": channel_id}
+
+        try:
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            page = await page_store.get_page_by_slug(
+                channel_id, page_slug, target_lang=target_lang
+            )
+            if page is None:
+                return {
+                    "error": "page_not_found",
+                    "channel_id": channel_id,
+                    "page_slug": page_slug,
+                }
+            sections = page.narrative_sections or []
+            # Page exists but predates narrative generation OR fell back —
+            # surface a clear ``narrative_not_available`` so the agent
+            # can fall back to read_wiki_page without retry loops.
+            if not sections:
+                return {
+                    "error": "narrative_not_available",
+                    "page_slug": page_slug,
+                    "has_modules": bool(page.modules),
+                    "suggestion": "Use read_wiki_page for module-only data.",
+                }
+            available_anchors: list[str] = []
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                section_anchor = str(section.get("anchor") or "")
+                available_anchors.append(section_anchor)
+                if section_anchor == anchor:
+                    return {
+                        "anchor": section_anchor,
+                        "heading": section.get("heading") or "",
+                        "paragraphs": list(section.get("paragraphs") or []),
+                        "citations": list(section.get("citations") or []),
+                        "visual": section.get("visual"),
+                        "page_slug": page_slug,
+                    }
+            return {
+                "error": "section_not_found",
+                "page_slug": page_slug,
+                "available_anchors": available_anchors,
+            }
+        except Exception:
+            logger.exception(
+                "read_wiki_section: failed principal=%s channel=%s slug=%s anchor=%s",
+                principal_id,
+                channel_id,
+                page_slug,
+                anchor,
+            )
+            return {"error": "internal_error", "page_slug": page_slug}
+
     @mcp.tool(name="read_provenance")
     async def read_provenance(
         fact_id: Annotated[str, "The fact id whose source message to return"],

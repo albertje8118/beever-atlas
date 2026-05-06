@@ -415,4 +415,109 @@ async def wiki_drift_summary(days: int = 14) -> dict:
     }
 
 
+@router.get("/wiki/narrative-health")
+async def wiki_narrative_health(channel_id: str = "") -> dict:
+    """Per-channel narrative-article health stats for the operator dashboard.
+
+    Aggregates wiki page documents in a channel and surfaces the soak
+    metrics defined in
+    ``openspec/changes/wiki-narrative-articles/`` Phase 9:
+
+      - ``narrative_pct``: fraction of pages with non-empty
+        ``narrative_sections`` (i.e., the v3 narrative pass succeeded
+        AND survived the validator).
+      - ``median_citation_coverage``: median per-page citation
+        coverage across pages with narrative.
+      - ``median_word_count``: median article word count across pages
+        with narrative.
+      - ``fallback_rate``: 1 - narrative_pct (pages where the v3 pass
+        was attempted but the page rendered module-only).
+      - ``page_count``: total pages in the channel.
+      - ``narrative_page_count``: count of pages with narrative.
+
+    Empty channel returns the documented zeroed shape with HTTP 200 so
+    the dashboard renders an empty-state card cleanly.
+
+    Spec: ``wiki-narrative-articles`` Phase 9 task 9.3.
+    """
+    if not channel_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="channel_id query parameter is required",
+        )
+    try:
+        from beever_atlas.wiki.page_store import WikiPageStore
+
+        stores = get_stores()
+        page_store = WikiPageStore(db=stores.mongodb.db)
+        pages = await page_store.list_pages(channel_id, target_lang="en")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki/narrative-health: list_pages failed: %s", exc)
+        pages = []
+
+    page_count = len(pages)
+    if page_count == 0:
+        return {
+            "channel_id": channel_id,
+            "page_count": 0,
+            "narrative_page_count": 0,
+            "narrative_pct": 0.0,
+            "median_citation_coverage": 0.0,
+            "median_word_count": 0,
+            "fallback_rate": 0.0,
+        }
+
+    coverages: list[float] = []
+    word_counts: list[int] = []
+    narrative_count = 0
+    for page in pages:
+        sections = page.narrative_sections or []
+        if not sections:
+            continue
+        narrative_count += 1
+        # Per-page coverage = mean of per-section citation_coverage
+        # values. Falls back to 0.0 when a section's coverage field
+        # is missing (older / hand-edited rows).
+        section_covs: list[float] = []
+        page_words = 0
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            cov = section.get("citation_coverage")
+            if isinstance(cov, (int, float)):
+                section_covs.append(float(cov))
+            for paragraph in section.get("paragraphs") or []:
+                if isinstance(paragraph, dict):
+                    text = paragraph.get("text") or ""
+                    if isinstance(text, str):
+                        page_words += len(text.split())
+        if section_covs:
+            coverages.append(sum(section_covs) / len(section_covs))
+        word_counts.append(page_words)
+
+    def _median(xs: list[float]) -> float:
+        if not xs:
+            return 0.0
+        sorted_xs = sorted(xs)
+        mid = len(sorted_xs) // 2
+        if len(sorted_xs) % 2 == 1:
+            return float(sorted_xs[mid])
+        return float((sorted_xs[mid - 1] + sorted_xs[mid]) / 2)
+
+    narrative_pct = narrative_count / page_count
+    median_coverage = _median(coverages)
+    median_words = int(_median([float(w) for w in word_counts]))
+    fallback_rate = 1.0 - narrative_pct
+
+    return {
+        "channel_id": channel_id,
+        "page_count": page_count,
+        "narrative_page_count": narrative_count,
+        "narrative_pct": narrative_pct,
+        "median_citation_coverage": median_coverage,
+        "median_word_count": median_words,
+        "fallback_rate": fallback_rate,
+    }
+
+
 __all__ = ["router"]
