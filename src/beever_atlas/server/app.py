@@ -250,6 +250,46 @@ async def lifespan(app: FastAPI):
                         exc,
                         _env_default_mode,
                     )
+
+                # Auto-initial-build hook: in auto mode, the very first
+                # extraction batch on a channel with no wiki kicks off the
+                # canonical from-scratch builder once. The maintainer is
+                # incremental and cannot produce the initial structure
+                # plan, so without this hook a brand-new channel sits at
+                # "no wiki yet" until the user clicks Generate. The hook
+                # short-circuits the maintainer call for THIS batch when
+                # it fires; subsequent events fall through to incremental.
+                if mode == "auto":
+                    try:
+                        from beever_atlas.infra.config import (
+                            get_settings as _gs,
+                        )
+                        from beever_atlas.services.wiki_auto_builder import (
+                            maybe_trigger_initial_build,
+                        )
+                        from beever_atlas.wiki.cache import WikiCache as _WC
+
+                        _cache = _WC(_gs().mongodb_uri)
+                        # Pass target_lang=None so the builder's own
+                        # per-channel language-resolution logic runs.
+                        # ``maybe_trigger_initial_build`` resolves None
+                        # to ``settings.default_target_language`` for
+                        # the cache lookups internally.
+                        kicked_off = await maybe_trigger_initial_build(
+                            channel_id,
+                            None,
+                            cache=_cache,
+                        )
+                        if kicked_off:
+                            return
+                    except Exception as exc:  # noqa: BLE001
+                        logging.getLogger(__name__).warning(
+                            "wiki_auto_initial_build hook failed channel=%s err=%s — "
+                            "falling through to incremental maintainer",
+                            channel_id,
+                            exc,
+                        )
+
                 await maintainer.on_extraction_done(channel_id, fact_ids, mode=mode)
 
             def _on_done_log_exc(task: _asyncio.Task) -> None:

@@ -487,6 +487,26 @@ class Settings(BaseSettings):
     # full-regenerate quality on three real channels.
     wiki_maintenance_mode: str = Field(default="manual", alias="WIKI_MAINTENANCE_MODE")
 
+    # Auto-trigger an initial wiki build the first time a channel crosses
+    # the fact-count threshold under ``WIKI_MAINTENANCE_MODE=auto``. Without
+    # this, a brand-new channel sits at "no wiki yet" until the user
+    # manually clicks Generate — surprising for the Karpathy-style "wiki
+    # is alive" framing. The maintainer is incremental-only and cannot
+    # produce the initial structure plan; this flag bridges that gap.
+    # Disable to revert to the manual-first-build flow.
+    wiki_auto_initial_build: bool = Field(
+        default=True, alias="WIKI_AUTO_INITIAL_BUILD"
+    )
+
+    # Minimum extracted-fact count before auto-initial-build fires. A
+    # one-fact wiki is worse than no wiki — wait for enough signal to
+    # produce a useful structure plan. The check runs on every
+    # ``on_extraction_done`` event for channels with no wiki, so the build
+    # fires on the first event that crosses this threshold.
+    wiki_auto_initial_build_threshold: int = Field(
+        default=10, alias="WIKI_AUTO_INITIAL_BUILD_THRESHOLD"
+    )
+
     # Wiki page-voice drift A/B comparator.
     # When True, every successful ``WikiMaintainer.apply_update`` ALSO
     # schedules a fire-and-forget ``compare_apply_update_vs_regenerate``
