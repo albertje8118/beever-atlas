@@ -649,39 +649,6 @@ def _fallback_output(title: str, render_inputs: dict[str, Any]) -> "ModularPageO
     )
 
 
-def _narrative_articles_enabled(
-    *,
-    channel_config: dict[str, Any] | None = None,
-) -> bool:
-    """Resolve the effective ``wiki_narrative_articles_enabled`` flag.
-
-    Per-channel config overrides global setting: per-channel ``True``
-    wins over global ``False`` so operators can dogfood internal
-    channels first. Channel config shape (optional)::
-
-        channel.wiki.narrative_articles_enabled: bool
-
-    The config layer wraps ``settings.wiki_narrative_articles_enabled``;
-    a defensive try/except keeps this function safe when the settings
-    module is not importable (e.g., test environments without env vars
-    populated).
-    """
-    # Per-channel override has highest priority.
-    if isinstance(channel_config, dict):
-        wiki_cfg = channel_config.get("wiki")
-        if isinstance(wiki_cfg, dict):
-            override = wiki_cfg.get("narrative_articles_enabled")
-            if isinstance(override, bool):
-                return override
-    # Fall back to global setting.
-    try:
-        from beever_atlas.infra.config import get_settings
-
-        return bool(get_settings().wiki_narrative_articles_enabled)
-    except Exception:  # noqa: BLE001 — never propagate config errors
-        return False
-
-
 async def compile_topic_page_modular(
     *,
     title: str,
@@ -707,15 +674,16 @@ async def compile_topic_page_modular(
     Cost: one LLM call per topic page — same as the legacy
     ``TOPIC_PROMPT`` flow.
 
-    ``wiki-narrative-articles`` integration: when the feature flag is
-    ON (global setting OR per-channel override), the v3 prompt is
-    used; the LLM response carries an additional ``narrative_sections``
-    array that is validated, persisted to ``WikiPage.narrative_sections``,
-    and surfaces via the new ``narrative_article`` module. When OFF,
-    the v2 prompt is used and behaviour is byte-identical to today's.
+    ``wiki-narrative-articles`` integration: the v3 prompt is always
+    used. The LLM response carries a ``narrative_sections`` array that
+    is validated, persisted to ``WikiPage.narrative_sections``, and
+    surfaces via the new ``narrative_article`` module. When the
+    validator rejects (low coverage / parse error / LLM crash), the
+    orchestrator persists ``narrative_sections=[]`` and the page
+    renders module-only — that graceful fallback is the safety
+    mechanism, no operator-side feature flag.
     """
     from beever_atlas.wiki.prompts import (
-        build_module_compile_prompt,
         build_module_compile_prompt_v3,
         get_archetype_hint_block,
     )
@@ -730,38 +698,25 @@ async def compile_topic_page_modular(
         for spec in MODULE_CATALOG.values()
     ]
 
-    narrative_enabled = _narrative_articles_enabled(channel_config=channel_config)
-    if narrative_enabled:
-        # Per-archetype soft hints (Decision 2 in
-        # ``openspec/changes/wiki-narrative-articles/design.md``):
-        # Decision/Tension/Folder/Channel-Overview archetypes get a
-        # suggested section structure; Topic archetype gets the empty
-        # string — sections come entirely from cluster content.
-        archetype_hint = get_archetype_hint_block(
-            str(signals.get("archetype") or "")
-        )
-        prompt = build_module_compile_prompt_v3(
-            signals=signals,
-            module_catalog=catalog_view,
-            title=title,
-            summary=summary,
-            top_facts=top_facts,
-            top_people=top_people,
-            date_range_start=date_range_start,
-            date_range_end=date_range_end,
-            archetype_hint_block=archetype_hint,
-        )
-    else:
-        prompt = build_module_compile_prompt(
-            signals=signals,
-            module_catalog=catalog_view,
-            title=title,
-            summary=summary,
-            top_facts=top_facts,
-            top_people=top_people,
-            date_range_start=date_range_start,
-            date_range_end=date_range_end,
-        )
+    # Per-archetype soft hints (Decision 2 in
+    # ``openspec/changes/wiki-narrative-articles/design.md``):
+    # Decision/Tension/Folder/Channel-Overview archetypes get a
+    # suggested section structure; Topic archetype gets the empty
+    # string — sections come entirely from cluster content.
+    archetype_hint = get_archetype_hint_block(
+        str(signals.get("archetype") or "")
+    )
+    prompt = build_module_compile_prompt_v3(
+        signals=signals,
+        module_catalog=catalog_view,
+        title=title,
+        summary=summary,
+        top_facts=top_facts,
+        top_people=top_people,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        archetype_hint_block=archetype_hint,
+    )
 
     # Stage 1 — single LLM call.
     try:
@@ -769,22 +724,21 @@ async def compile_topic_page_modular(
         raw = await result if inspect.isawaitable(result) else result  # type: ignore[assignment]
     except Exception as exc:  # noqa: BLE001
         logger.exception("module_compile_llm_failed exc=%s", exc)
-        if narrative_enabled:
-            # H-8: emit ``narrative_article_metrics`` on the LLM-error
-            # fallback path so soak dashboards see fallback metrics
-            # consistently across every failure cause (LLM crash,
-            # parse error, validator rejection).
-            page_slug_for_log = str(render_inputs.get("page_id") or title)
-            logger.info(
-                "narrative_article_fallback reason=llm_error page=%s",
-                page_slug_for_log,
-            )
-            logger.info(
-                "narrative_article_metrics page=%s section_count=0 total_words=0 "
-                "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
-                "reason=llm_error",
-                page_slug_for_log,
-            )
+        # Emit ``narrative_article_metrics`` on the LLM-error fallback
+        # path so soak dashboards see fallback metrics consistently
+        # across every failure cause (LLM crash, parse error, validator
+        # rejection).
+        page_slug_for_log = str(render_inputs.get("page_id") or title)
+        logger.info(
+            "narrative_article_fallback reason=llm_error page=%s",
+            page_slug_for_log,
+        )
+        logger.info(
+            "narrative_article_metrics page=%s section_count=0 total_words=0 "
+            "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
+            "reason=llm_error",
+            page_slug_for_log,
+        )
         return _fallback_output(title, render_inputs)
 
     # Stage 2 — parse JSON response.
@@ -794,96 +748,92 @@ async def compile_topic_page_modular(
         logger.warning(
             "module_compile_parse_failed exc=%s raw_len=%d", exc, len(str(raw))
         )
-        if narrative_enabled:
-            # When the v3 path was used, the parse failure means the
-            # narrative payload is also lost — surface a structured
-            # fallback log line so soak telemetry sees the cause.
-            page_slug_for_log = str(render_inputs.get("page_id") or title)
-            logger.info(
-                "narrative_article_fallback reason=parse_error page=%s",
-                page_slug_for_log,
-            )
-            # H-8: also emit ``narrative_article_metrics`` on the
-            # parse-error fallback path. Without this, the soak
-            # dashboard sees ``rejected=False, section_count=0`` for
-            # every parse failure (because the metrics line was only
-            # emitted on the success branch) and operators can't
-            # distinguish "flag was OFF" from "v3 path crashed". The
-            # fallback record carries zero counts and the explicit
-            # ``rejected=True, reason=parse_error`` so dashboards can
-            # aggregate fallback rate consistently.
-            logger.info(
-                "narrative_article_metrics page=%s section_count=0 total_words=0 "
-                "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
-                "reason=parse_error",
-                page_slug_for_log,
-            )
+        # Parse failure means the narrative payload is also lost —
+        # surface a structured fallback log line so soak telemetry
+        # sees the cause.
+        page_slug_for_log = str(render_inputs.get("page_id") or title)
+        logger.info(
+            "narrative_article_fallback reason=parse_error page=%s",
+            page_slug_for_log,
+        )
+        # H-8: also emit ``narrative_article_metrics`` on the
+        # parse-error fallback path so dashboards can aggregate
+        # fallback rate consistently with the success path. Without
+        # this, the dashboard would see ``rejected=False,
+        # section_count=0`` for every parse failure.
+        logger.info(
+            "narrative_article_metrics page=%s section_count=0 total_words=0 "
+            "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
+            "reason=parse_error",
+            page_slug_for_log,
+        )
         return _fallback_output(title, render_inputs)
 
-    # Stage 2.5 — extract + validate narrative_sections (v3 path only).
-    # When the flag is OFF, narrative_sections always ends up empty so
-    # the new ``narrative_article`` module's predicate fails naturally
-    # and the page renders module-only (today's behaviour).
+    # Stage 2.5 — extract + validate narrative_sections.
+    # When the validator rejects (low coverage, parse error in any
+    # section, etc.), narrative_sections_clean ends up empty so the
+    # ``narrative_article`` module's predicate fails naturally and the
+    # page renders module-only — that graceful fallback is the safety
+    # mechanism for low-quality narrative output.
     narrative_sections_clean: list[dict[str, Any]] = []
     narrative_telemetry: dict[str, Any] = {}
-    if narrative_enabled:
-        from beever_atlas.wiki.modules.narrative_validator import (
-            validate_narrative_sections,
+    from beever_atlas.wiki.modules.narrative_validator import (
+        validate_narrative_sections,
+    )
+
+    raw_narrative = parsed.get("narrative_sections")
+    if not isinstance(raw_narrative, list):
+        raw_narrative = []
+    try:
+        (
+            narrative_sections_clean,
+            narrative_telemetry,
+        ) = validate_narrative_sections(
+            raw_narrative,
+            facts=top_facts,
         )
+    except Exception as exc:  # noqa: BLE001 — validator must never crash render
+        logger.exception(
+            "narrative_validator_unhandled_exception exc=%s", exc
+        )
+        narrative_sections_clean = []
+        narrative_telemetry = {
+            "rejected": True,
+            "reason": "validator_exception",
+            "citation_coverage": 0.0,
+            "total_words": 0,
+            "sections_dropped": 0,
+            "paragraphs_dropped": 0,
+        }
 
-        raw_narrative = parsed.get("narrative_sections")
-        if not isinstance(raw_narrative, list):
-            raw_narrative = []
-        try:
-            (
-                narrative_sections_clean,
-                narrative_telemetry,
-            ) = validate_narrative_sections(
-                raw_narrative,
-                facts=top_facts,
-            )
-        except Exception as exc:  # noqa: BLE001 — validator must never crash render
-            logger.exception(
-                "narrative_validator_unhandled_exception exc=%s", exc
-            )
-            narrative_sections_clean = []
-            narrative_telemetry = {
-                "rejected": True,
-                "reason": "validator_exception",
-                "citation_coverage": 0.0,
-                "total_words": 0,
-                "sections_dropped": 0,
-                "paragraphs_dropped": 0,
-            }
-
-        page_slug_for_log = str(render_inputs.get("page_id") or title)
-        if narrative_telemetry.get("rejected"):
-            logger.info(
-                "narrative_article_fallback reason=%s page=%s coverage=%.3f",
-                narrative_telemetry.get("reason", "unknown"),
-                page_slug_for_log,
-                float(narrative_telemetry.get("citation_coverage", 0.0)),
-            )
-        # Surface the article-level telemetry on the orchestrator's
-        # log line so soak dashboards can aggregate without re-reading
-        # persisted documents.
+    page_slug_for_log = str(render_inputs.get("page_id") or title)
+    if narrative_telemetry.get("rejected"):
         logger.info(
-            "narrative_article_metrics page=%s section_count=%d total_words=%d "
-            "citation_coverage=%.3f distinct_facts_cited=%d rejected=%s",
+            "narrative_article_fallback reason=%s page=%s coverage=%.3f",
+            narrative_telemetry.get("reason", "unknown"),
             page_slug_for_log,
-            int(narrative_telemetry.get("section_count", len(narrative_sections_clean))),
-            int(narrative_telemetry.get("total_words", 0)),
             float(narrative_telemetry.get("citation_coverage", 0.0)),
-            int(narrative_telemetry.get("distinct_facts_cited", 0)),
-            bool(narrative_telemetry.get("rejected", False)),
         )
-        # Make the narrative payload available to module data builders
-        # (the ``narrative_article`` builder reads from render_inputs).
-        render_inputs["narrative_sections"] = narrative_sections_clean
-        # Refresh the signal so the planner / validator see the post-
-        # validation count when picking the ``narrative_article`` module.
-        signals = dict(signals)
-        signals["narrative_section_count"] = len(narrative_sections_clean)
+    # Surface the article-level telemetry on the orchestrator's
+    # log line so soak dashboards can aggregate without re-reading
+    # persisted documents.
+    logger.info(
+        "narrative_article_metrics page=%s section_count=%d total_words=%d "
+        "citation_coverage=%.3f distinct_facts_cited=%d rejected=%s",
+        page_slug_for_log,
+        int(narrative_telemetry.get("section_count", len(narrative_sections_clean))),
+        int(narrative_telemetry.get("total_words", 0)),
+        float(narrative_telemetry.get("citation_coverage", 0.0)),
+        int(narrative_telemetry.get("distinct_facts_cited", 0)),
+        bool(narrative_telemetry.get("rejected", False)),
+    )
+    # Make the narrative payload available to module data builders
+    # (the ``narrative_article`` builder reads from render_inputs).
+    render_inputs["narrative_sections"] = narrative_sections_clean
+    # Refresh the signal so the planner / validator see the post-
+    # validation count when picking the ``narrative_article`` module.
+    signals = dict(signals)
+    signals["narrative_section_count"] = len(narrative_sections_clean)
 
     # Stage 3 — validate the plan + parse the TL;DR + overview the
     # planner LLM emitted (needed by Stage 4 for hero_summary).

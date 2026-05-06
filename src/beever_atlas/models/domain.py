@@ -326,9 +326,8 @@ class WikiPage(BaseModel):
     modules: list[dict[str, Any]] = Field(default_factory=list)
 
     # ``wiki-narrative-articles`` — multi-section narrative article
-    # body produced by the v3 ``MODULE_COMPILE_PROMPT`` when the
-    # ``WIKI_NARRATIVE_ARTICLES`` feature flag is on. Each entry is
-    # ``{anchor, heading, paragraphs: [{text, citations[],
+    # body produced by the v3 ``MODULE_COMPILE_PROMPT_V3``. Each entry
+    # is ``{anchor, heading, paragraphs: [{text, citations[],
     # is_inference}], citations[], visual: dict | None,
     # citation_coverage: float}``. Mirrors ``persistence.WikiPage.
     # narrative_sections`` so the domain → ``model_dump`` →

@@ -76,11 +76,12 @@ export interface WikiPage {
    *  the single-template flow over ``content``. */
   modules?: WikiPageModule[];
   /** Multi-section narrative article body produced by the v3
-   *  ``MODULE_COMPILE_PROMPT`` when the ``WIKI_NARRATIVE_ARTICLES``
-   *  feature flag is on. Mirrors the persistence-layer field. The
-   *  layout reads this to mount the sticky TOC; the
+   *  ``MODULE_COMPILE_PROMPT_V3``. Mirrors the persistence-layer
+   *  field. The layout reads this to mount the sticky TOC; the
    *  ``NarrativeArticleModule`` reads the same payload via its
-   *  ``module.data.sections`` slice. */
+   *  ``module.data.sections`` slice. Empty array means the page
+   *  predates narrative generation OR the validator rejected the
+   *  LLM output (graceful fallback to module-only rendering). */
   narrative_sections?: Array<{
     anchor: string;
     heading: string;

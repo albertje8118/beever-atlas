@@ -64,33 +64,19 @@ def _render_inputs() -> dict:
     }
 
 
-def _enable_narrative_flag(monkeypatch) -> None:
-    """Patch the settings accessor so the orchestrator's effective
-    flag is ON for this test, regardless of env state."""
-    from types import SimpleNamespace
-
-    fake_settings = SimpleNamespace(wiki_narrative_articles_enabled=True)
-    monkeypatch.setattr(
-        "beever_atlas.infra.config.get_settings",
-        lambda: fake_settings,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Parse-error fallback
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_parse_error_falls_back_to_module_only(monkeypatch) -> None:
+async def test_parse_error_falls_back_to_module_only() -> None:
     """LLM returns non-JSON garbage → fallback fires; page still renders.
 
     The orchestrator logs ``narrative_article_fallback reason=parse_error``
     and the catastrophic ``_fallback_output`` path produces a key_facts-
     only page so the user sees something.
     """
-    _enable_narrative_flag(monkeypatch)
-
     # Capture log records by attaching a list-handler to the orchestrator
     # logger directly. caplog doesn't reliably intercept loggers that
     # have custom handlers via the project's logging config.
@@ -142,11 +128,9 @@ async def test_parse_error_falls_back_to_module_only(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_low_citation_coverage_rejects_narrative(monkeypatch) -> None:
+async def test_low_citation_coverage_rejects_narrative() -> None:
     """LLM returns valid JSON with mostly-uncited paragraphs → validator
     rejects → narrative_sections persisted as empty, page renders module-only."""
-    _enable_narrative_flag(monkeypatch)
-
     import logging
     captured: list[logging.LogRecord] = []
 
@@ -220,67 +204,18 @@ async def test_low_citation_coverage_rejects_narrative(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Flag OFF → no narrative pass at all
+# v3 prompt is always used (the WIKI_NARRATIVE_ARTICLES flag was removed —
+# graceful fallback to module-only is the safety mechanism, not a flag).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_flag_off_skips_narrative_entirely(monkeypatch) -> None:
-    """When the flag is OFF, the orchestrator uses v2 prompt and
-    narrative_sections is always empty."""
-    from types import SimpleNamespace
-
-    fake_settings = SimpleNamespace(wiki_narrative_articles_enabled=False)
-    monkeypatch.setattr(
-        "beever_atlas.infra.config.get_settings",
-        lambda: fake_settings,
-    )
-
-    response = {
-        "plan": {
-            "modules": [
-                {"id": "key_facts", "anchor": "kf"},
-            ]
-        },
-        "tldr": "**Authlib was adopted.**",
-        "overview": "Auth migration done.",
-        "body": "<<MODULE:key_facts>>",
-    }
-
-    async def fake_llm(prompt: str) -> str:
-        return json.dumps(response)
-
-    out = await compile_topic_page_modular(
-        title="Authlib OIDC Adoption",
-        summary="Auth migration.",
-        signals=_signals_for_test(),
-        render_inputs=_render_inputs(),
-        top_facts=[],
-        top_people=[],
-        llm=fake_llm,
-    )
-    assert out.narrative_sections == []
-    assert out.narrative_telemetry == {}
-
-
-# ---------------------------------------------------------------------------
-# Per-channel override beats global OFF
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_per_channel_override_overrides_global_flag(monkeypatch) -> None:
-    """When global flag is OFF but the channel config sets it ON, the
-    v3 path runs. We don't need a full LLM; just assert the v3 prompt
-    was sent (by inspecting the prompt string the LLM received)."""
-    from types import SimpleNamespace
-
-    fake_settings = SimpleNamespace(wiki_narrative_articles_enabled=False)
-    monkeypatch.setattr(
-        "beever_atlas.infra.config.get_settings",
-        lambda: fake_settings,
-    )
-
+async def test_v3_prompt_always_invoked() -> None:
+    """The orchestrator always invokes the v3 prompt — there is no
+    flag gate. When the LLM returns an empty narrative_sections array,
+    the page still renders module-only because the validator yields
+    an empty cleaned list and the ``narrative_article`` module's
+    predicate fails naturally."""
     received_prompts: list[str] = []
 
     async def capturing_llm(prompt: str) -> str:
@@ -294,7 +229,7 @@ async def test_per_channel_override_overrides_global_flag(monkeypatch) -> None:
             "body": "<<MODULE:key_facts>>",
         })
 
-    await compile_topic_page_modular(
+    out = await compile_topic_page_modular(
         title="X",
         summary="Y",
         signals=_signals_for_test(),
@@ -302,14 +237,15 @@ async def test_per_channel_override_overrides_global_flag(monkeypatch) -> None:
         top_facts=[],
         top_people=[],
         llm=capturing_llm,
-        channel_config={"wiki": {"narrative_articles_enabled": True}},
     )
     # The v3 prompt explicitly enumerates ``narrative_sections``; v2
     # does not. Use that as the path-discriminator.
     assert received_prompts, "expected at least one LLM call"
     assert '"narrative_sections":' in received_prompts[0], (
-        "per-channel override did not activate the v3 prompt path"
+        "orchestrator did not invoke the v3 prompt"
     )
+    # Empty narrative_sections + valid plan → page renders module-only.
+    assert out.narrative_sections == []
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +254,7 @@ async def test_per_channel_override_overrides_global_flag(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_parse_error_fallback_emits_metrics_line(monkeypatch) -> None:
+async def test_parse_error_fallback_emits_metrics_line() -> None:
     """H-8: when the v3 path hits a parse error, the orchestrator emits
     BOTH a ``narrative_article_fallback`` line AND a
     ``narrative_article_metrics`` line so the soak dashboard can
@@ -328,8 +264,6 @@ async def test_parse_error_fallback_emits_metrics_line(monkeypatch) -> None:
     only emitted on success) and operators can't distinguish "flag
     OFF" from "v3 path crashed".
     """
-    _enable_narrative_flag(monkeypatch)
-
     import logging
     captured: list[logging.LogRecord] = []
 
@@ -377,12 +311,10 @@ async def test_parse_error_fallback_emits_metrics_line(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_error_fallback_emits_metrics_line(monkeypatch) -> None:
+async def test_llm_error_fallback_emits_metrics_line() -> None:
     """H-8 sister case: when the LLM call itself raises, the
     orchestrator should still emit fallback + metrics lines so the
     dashboard can aggregate llm-error fallback rate."""
-    _enable_narrative_flag(monkeypatch)
-
     import logging
     captured: list[logging.LogRecord] = []
 

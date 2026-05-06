@@ -1,11 +1,18 @@
 # Wiki Narrative Articles — operator rollout runbook
 
-This runbook covers Phase 10 of the
-[`wiki-narrative-articles`](../../openspec/changes/wiki-narrative-articles/proposal.md)
-OpenSpec change — flipping the `WIKI_NARRATIVE_ARTICLES` feature flag
-on a real channel, validating output quality, and rolling back via
-flag flip if the synthesized articles regress on a particular
-channel shape.
+This runbook covers operating the wiki narrative-article generation
+shipped on `redesign/oss-pipeline-and-wiki` — validating output
+quality after a regen, reading the validator's telemetry signals,
+tuning the citation-coverage threshold if needed, and rolling back
+via revert if the feature regresses on a particular channel shape.
+
+> **Changelog**: the original rollout shipped behind a
+> `WIKI_NARRATIVE_ARTICLES` env var (default OFF) plus a per-channel
+> `wiki.narrative_articles_enabled` override. Both were removed —
+> narrative generation is now the unconditional default. The
+> graceful fallback path (validator rejects → page renders
+> module-only) provides the same safety guarantee as the flag without
+> operator-side flag management.
 
 ## What the feature does
 
@@ -20,77 +27,57 @@ ONE LLM call per page (same cardinality as the v2 prompt) — output
 tokens grow ~30-60%, total cost stays well below the 2-3x increase
 a multi-pass approach would incur.
 
-## Default rollout state
+## Default behaviour
 
-- `WIKI_NARRATIVE_ARTICLES` env var is **OFF by default** at every
-  deployment tier (local dev, staging, production).
-- Pre-flag wiki pages render with today's module-only behavior.
-- The new `narrative_article` module renders nothing when no
-  validated `narrative_sections` are persisted on the page.
+- Every wiki page regen invokes the v3 `MODULE_COMPILE_PROMPT_V3`
+  prompt unconditionally.
+- The LLM response carries a `narrative_sections` array that the
+  orchestrator validates (citation coverage, word caps, forbidden
+  phrases). The validated payload is persisted to
+  `WikiPage.narrative_sections`.
+- The frontend mounts the article + sticky TOC at the top of every
+  page; existing modules render below in a collapsible
+  "Reference & Evidence" appendix.
 
-## Enabling per-channel (preferred)
+## Implicit fallback (the safety mechanism)
 
-Per-channel toggle is the **recommended** activation path — it
-limits blast radius, lets the operator A/B-compare a single channel
-against the rest, and short-circuits a global flag flip if quality
-regresses on one channel shape.
+When narrative generation fails ANY validator gate, the orchestrator
+persists `narrative_sections=[]` and emits a structured telemetry
+log line. The frontend's `narrative_article` module's predicate
+fails naturally (no sections to render), so the page falls back to
+today's module-only layout. **No broken pages — just a telemetry
+log line that operators can grep for.**
 
-1. Open the channel's config in the channel-config admin store.
-2. Set `wiki.narrative_articles_enabled: true` on that channel.
-3. Trigger a full wiki regen for that channel:
+The fallback fires for any of these conditions:
 
-   ```bash
-   curl -X POST "https://atlas/api/channels/<channel_id>/wiki/refresh?mode=full" \
-     -H "Authorization: Bearer $BEARER"
-   ```
+- LLM call raises (network error, provider outage)
+- LLM response cannot be parsed as JSON
+- Citation coverage < 80% across the article
+- Every paragraph drops to the forbidden-phrase filter or the
+  uncited-paragraph filter (`no_sections_after_validation`)
+- Validator raises an unhandled exception (`validator_exception`)
 
-4. Wait for `extraction_status="done"` on every fact in the channel
-   (or use the operator dashboard to check progress).
-5. Visit a topic page in the live web UI and validate (see
-   [Validation checklist](#validation-checklist) below).
+Each fallback emits two log lines for soak dashboards:
 
-Per-channel `True` always wins over the global env var being
-`False`. The reverse is also true: a per-channel `False` (explicit)
-overrides a global `True`. This is the existing
-maintenance-mode pattern; see `_narrative_articles_enabled()` in
-`src/beever_atlas/wiki/modules/orchestrator.py`.
-
-## Enabling globally (deferred — only after 4+ weeks of soak)
-
-After at least 4 weeks of soak across 2-3 channels with healthy
-telemetry, you may flip the global flag.
-
-```bash
-# Edit the deployment env (e.g. fly.toml, k8s ConfigMap, .env):
-WIKI_NARRATIVE_ARTICLES=true
+```
+narrative_article_fallback reason=<reason> page=<slug> [coverage=<pct>]
+narrative_article_metrics page=<slug> section_count=0 total_words=0 \
+  citation_coverage=0.000 distinct_facts_cited=0 rejected=True \
+  reason=<reason>
 ```
 
-After redeployment, every NEW page regen on every channel uses the
-v3 prompt + narrative generation. Existing channels with explicit
-per-channel `False` continue to opt out.
+## Validating output quality after a regen
 
-## Rollback
+After triggering a wiki regen on a channel:
 
-The feature is fully rollback-able via flag flip — no code change
-required.
+```bash
+curl -X POST "https://atlas/api/channels/<channel_id>/wiki/refresh?mode=full" \
+  -H "Authorization: Bearer $BEARER"
+```
 
-- **Per-channel rollback**: set `wiki.narrative_articles_enabled: false`
-  on the channel; trigger regen. The next compile uses the v2 prompt
-  and persists `narrative_sections=[]`. The frontend falls back to
-  module-only layout (existing modules render at top, no
-  "Reference & Evidence" appendix label).
-- **Global rollback**: set `WIKI_NARRATIVE_ARTICLES=false` and
-  redeploy. Existing pages keep their cached `narrative_sections`
-  on disk (they don't disappear) but no new pages get narrative
-  generation. To purge cached articles, force a regen with the
-  flag off — the orchestrator persists `narrative_sections=[]` and
-  the article disappears.
-- **Implicit rollback** (no operator action): if the LLM fails JSON
-  parse or the validator rejects the narrative on citation
-  coverage, the orchestrator logs
-  `narrative_article_fallback reason=<reason> page=<slug>` and
-  persists `narrative_sections=[]` for that page. The user sees a
-  working module-only page; the operator sees a telemetry warning.
+Wait for `extraction_status="done"` on every fact, then visit a
+topic page in the live web UI and run the [Validation
+checklist](#validation-checklist).
 
 ## Telemetry queries to watch
 
@@ -99,9 +86,9 @@ via your log aggregator (Loki, Splunk, etc.):
 
 | Metric | Log line | Health threshold |
 |---|---|---|
-| Article generation success | `narrative_article_persisted page=<slug> sections=<n>` | ≥ 90% of pages |
-| Citation coverage (median) | `narrative_telemetry coverage=<pct>` | ≥ 80% median |
-| Output token growth | `narrative_output_tokens=<n>` (vs. v2 baseline) | ≤ 1.6x baseline median |
+| Article generation success | `narrative_article_persisted page=<slug> sections=<n>` | >= 90% of pages |
+| Citation coverage (median) | `narrative_telemetry coverage=<pct>` | >= 80% median |
+| Output token growth | `narrative_output_tokens=<n>` (vs. v2 baseline) | <= 1.6x baseline median |
 | Fallback rate | `narrative_article_fallback reason=<reason>` | < 10% of regens |
 | Forbidden-phrase drops | `narrative_paragraph_dropped reason=activity_narration` | < 5% of paragraphs |
 | Section-cap violations | `narrative_section_over_cap section=<a> words=<n>` | < 1% of sections |
@@ -111,10 +98,68 @@ returns per-channel narrative health (% of pages with full articles,
 median citation coverage, median word count, fallback rate, dominant
 fallback reasons).
 
+## Tuning the validator
+
+The citation-coverage gate is a **configurable constant** in
+`src/beever_atlas/wiki/modules/narrative_validator.py`. Default is
+80% — bump it down to 70% if too many otherwise-good narratives are
+rejected on a channel with sparse fact density; bump it up to 90%+
+if a channel produces well-cited narratives but a few hallucinations
+slip through.
+
+Other tunables in the same file:
+
+- Forbidden-phrase list (substring match, case-insensitive)
+- Word cap per section (default 150-400)
+- Word cap per article (default 1500-3000 typical, 5000+ landmark)
+
+After changing a tunable, re-regen the affected channel and watch
+the telemetry queries above.
+
+## What to do when validator rejects on a specific page
+
+1. Check the structured fallback log for the page slug:
+   ```
+   narrative_article_metrics page=<slug> ... rejected=True reason=<reason>
+   ```
+2. Map the reason to the fix:
+   - `parse_error` — LLM returned non-JSON. Re-run the regen for that
+     page; if persistent, file a prompt-tuning ticket.
+   - `low_citation_coverage` — the LLM under-cited. Often indicates
+     thin source data (cluster has < 5 facts) — consider whether
+     the page should exist at all.
+   - `no_sections_after_validation` — every paragraph dropped under
+     the forbidden-phrase or uncited filter. Usually a prompt-tuning
+     issue if persistent.
+   - `validator_exception` — a bug in the validator. File a ticket
+     with the page slug and the structured log line.
+   - `llm_error` — the LLM provider call itself raised. Re-run the
+     regen.
+
+## Rollback
+
+Narrative generation is no longer flag-gated. To roll back the
+feature:
+
+1. **Per-page** — no operator action needed when the validator
+   rejects on a specific page; the implicit fallback already
+   renders module-only with a telemetry log line.
+2. **Channel-wide regression** — if narrative quality regresses on
+   an entire channel shape (e.g., highly technical jargon, non-English
+   content), tune the validator threshold for stricter rejection
+   first; if that's insufficient, revert the narrative-article
+   commits on `redesign/oss-pipeline-and-wiki`. There is no env var
+   or per-channel flag to flip — rollback is git-revert.
+
+To purge cached `narrative_sections` from existing pages, force a
+regen with the validator's threshold set high enough to reject all
+output; the orchestrator persists `narrative_sections=[]` and the
+article disappears.
+
 ## Validation checklist
 
-After enabling on a channel, manually validate **at least one page
-of each shape** before committing to soak:
+After regen on a channel, manually validate **at least one page of
+each shape** before considering the channel healthy:
 
 ### Topic page (default archetype)
 - [ ] Article appears at the top with 3-7 sections.
@@ -153,16 +198,6 @@ of each shape** before committing to soak:
 - [ ] No editorial side-taking in the prose.
 - [ ] `tension_callout` module appears in the appendix.
 
-## Soak plan (recommended)
-
-1. **Week 1** — internal `tech-beever-atlas` channel only. Validate
-   above checklist; check telemetry; collect dogfood feedback.
-2. **Week 2-3** — 1-2 customer channels with operator buy-in. Soak
-   with daily telemetry checks; address any per-channel quality
-   regressions before broadening.
-3. **Week 4+** — broaden to 5-10 channels. Once telemetry stays
-   healthy across all, consider global default-ON for new channels.
-
 ## Known issues / soak observations to watch for
 
 These were identified during design + Phase 1-9 testing. None block
@@ -170,11 +205,11 @@ rollout, but watch for them in soak telemetry:
 
 - **Hallucinated content not supported by source facts.** Mitigation:
   validator drops uncited paragraphs; `is_inference: true` paragraphs
-  must still cite ≥ 1 fact_id. If hallucinations leak through, the
+  must still cite >= 1 fact_id. If hallucinations leak through, the
   operator can flag a paragraph via the existing curation API; track
   per-channel hallucination rate. If a single channel exceeds 5%
-  hallucination rate, disable narrative on that channel and file a
-  prompt-tuning ticket.
+  hallucination rate, tune the validator threshold up for that
+  channel and file a prompt-tuning ticket.
 - **Bland or repetitive sections across pages.** Mitigation: archetype
   hints differ per page kind; the prompt forbids "shared a link" /
   "noted that" narration. Watch for sections that read as filler
@@ -190,7 +225,7 @@ rollout, but watch for them in soak telemetry:
   `narrative_section_over_cap section=<a> words=<n>`. Persistent
   over-cap on a specific page shape signals a prompt-tuning issue.
 - **TOC competes with sidebar/header layout on mid-width viewports.**
-  Mitigation: TOC is sticky right-rail when viewport ≥ 1024px;
+  Mitigation: TOC is sticky right-rail when viewport >= 1024px;
   collapses into a "Jump to section" dropdown below threshold. If
   the TOC obscures content on a specific viewport size, file a
   frontend ticket.
@@ -203,14 +238,12 @@ rollout, but watch for them in soak telemetry:
 
 ## Pointers
 
-- Feature flag implementation:
-  `src/beever_atlas/infra/config.py::settings.wiki_narrative_articles_enabled`
-- Per-channel override + flag dispatch:
-  `src/beever_atlas/wiki/modules/orchestrator.py::_narrative_articles_enabled`
 - v3 prompt + archetype hint blocks:
   `src/beever_atlas/wiki/prompts.py::build_module_compile_prompt_v3` +
   `get_archetype_hint_block`
-- Validator (citation discipline + word caps):
+- Orchestrator dispatch:
+  `src/beever_atlas/wiki/modules/orchestrator.py::compile_topic_page_modular`
+- Validator (citation discipline + word caps + threshold):
   `src/beever_atlas/wiki/modules/narrative_validator.py`
 - Frontend article + TOC:
   `web/src/components/wiki/modules/NarrativeArticleModule.tsx` +

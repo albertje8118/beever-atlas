@@ -563,20 +563,6 @@ class Settings(BaseSettings):
         default=0.70, alias="WIKI_PAGE_MERGE_THRESHOLD"
     )
 
-    # ``wiki-narrative-articles`` feature flag — gates the v3 prompt
-    # narrative pass + frontend article-first rendering. Default OFF
-    # so existing channels render with today's module-only behaviour
-    # unchanged. Operators flip per-channel after validating quality.
-    # When OFF, the orchestrator uses the v2 prompt (byte-identical to
-    # today's behaviour); when ON, the orchestrator uses the v3 prompt
-    # and persists ``narrative_sections`` on the page.
-    # Per-channel override: ``channel.wiki.narrative_articles_enabled``
-    # in the channel config; per-channel ``True`` wins over global
-    # ``False`` so operators can dogfood internal channels first.
-    wiki_narrative_articles_enabled: bool = Field(
-        default=False, alias="WIKI_NARRATIVE_ARTICLES"
-    )
-
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared
