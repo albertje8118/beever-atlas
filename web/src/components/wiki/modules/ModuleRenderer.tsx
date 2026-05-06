@@ -96,6 +96,32 @@ function extractGlossary(
 // and lighter background tint.
 const READING_AIDS_IDS = new Set(["acronym_legend", "provenance_drawer"]);
 
+/** Reading-aid renderers (``AcronymLegendModule``, ``ProvenanceDrawerModule``)
+ *  return ``null`` when their data payload is empty. The wrapping
+ *  ``<aside data-testid="wiki-page-footer">`` block in
+ *  ``ModuleRenderer`` would still render its "Reading aids" header in
+ *  that case, leaving an orphan label with no body — confusing for the
+ *  user. This predicate filters empty modules out at the parent so the
+ *  whole aside is suppressed when both children would render null.
+ *
+ *  Keep this in sync with the inner-renderer empty-checks:
+ *  - ``AcronymLegendModule.tsx`` returns null when ``data.items`` is empty.
+ *  - ``ProvenanceDrawerModule.tsx`` returns null when ``data.messages``
+ *    is empty.
+ */
+function hasReadingAidContent(module: WikiPageModule): boolean {
+  const data = (module.data ?? {}) as Record<string, unknown>;
+  if (module.id === "acronym_legend") {
+    return Array.isArray(data.items) && data.items.length > 0;
+  }
+  if (module.id === "provenance_drawer") {
+    return Array.isArray(data.messages) && data.messages.length > 0;
+  }
+  // Defensive default — any future reading-aid module passes through
+  // until a specific predicate is added here.
+  return true;
+}
+
 // The narrative_article module is the new spotlight (see
 // ``wiki-narrative-articles`` change) — when present it renders FIRST
 // in its own reading column, and the existing 26 modules below get
@@ -147,7 +173,9 @@ export function ModuleRenderer({
   const spineModules = modules.filter(
     (m) => !READING_AIDS_IDS.has(m.id) && m.id !== NARRATIVE_ARTICLE_ID,
   );
-  const readingAidsModules = modules.filter((m) => READING_AIDS_IDS.has(m.id));
+  const readingAidsModules = modules
+    .filter((m) => READING_AIDS_IDS.has(m.id))
+    .filter((m) => hasReadingAidContent(m));
   // Keep the canonical reading-aids order: acronym_legend first
   // (definitions help understand the page body), then provenance
   // drawer (sources you might want to follow up on).

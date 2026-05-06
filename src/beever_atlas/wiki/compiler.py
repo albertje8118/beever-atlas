@@ -2343,11 +2343,20 @@ class WikiCompiler:
         if not content or not citations:
             return citations
         used_indices: set[int] = set()
-        for m in cls._INLINE_CITATION_RE.finditer(content):
-            try:
-                used_indices.add(int(m.group(1)))
-            except ValueError:
-                pass
+        # Match BOTH single ``[N]`` and comma-grouped ``[N, M, ...]``
+        # forms so a body that uses ``[1, 2]`` is recognised as
+        # referencing both citation 1 AND citation 2. Without this, a
+        # comma-grouped reference is silently invisible to the filter
+        # and ``_filter_citations_to_body`` returns the unfiltered list
+        # (because ``used_indices`` ends up empty), inflating the
+        # rendered Sources panel with orphan citations.
+        _grouped_re = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+        for m in _grouped_re.finditer(content):
+            for part in m.group(1).split(","):
+                try:
+                    used_indices.add(int(part.strip()))
+                except ValueError:
+                    pass
         if not used_indices:
             return citations
         kept: list["WikiCitation"] = []

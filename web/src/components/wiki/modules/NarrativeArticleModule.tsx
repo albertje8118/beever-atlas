@@ -233,14 +233,52 @@ function CitationChip({ factId, displayIndex, citation }: CitationChipProps) {
   if (citation?.timestamp) titleParts.push(citation.timestamp);
   const titleText = titleParts.join(" ");
 
+  // Scroll-to-source behaviour mirrors ``CitationLink`` on the Overview
+  // path so a click on any narrative chip jumps to the matching entry
+  // in the Sources panel and briefly rings it. ``displayIndex`` is the
+  // 1-based number rendered on the chip, which matches the Sources
+  // panel's ``id={citation-${i + 1}}`` anchors.
+  const handleClick = () => {
+    const el = document.getElementById(`citation-${displayIndex}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add(
+        "ring-2",
+        "ring-primary",
+        "ring-offset-2",
+        "ring-offset-background",
+      );
+      setTimeout(
+        () =>
+          el.classList.remove(
+            "ring-2",
+            "ring-primary",
+            "ring-offset-2",
+            "ring-offset-background",
+          ),
+        2000,
+      );
+      return;
+    }
+    // CitationPanel's collapsed state hides citations beyond the first
+    // few; dispatch the same event the Overview path uses so the panel
+    // can expand and then scroll. Listener lives in CitationPanel.
+    window.dispatchEvent(
+      new CustomEvent("wiki:citation-jump", {
+        detail: { index: displayIndex },
+      }),
+    );
+  };
+
   return (
     <span className="group/cite relative inline-block align-baseline">
       <button
         type="button"
+        onClick={handleClick}
         data-fact-id={factId}
         data-testid="narrative-citation-chip"
         title={titleText || undefined}
-        className="inline-flex items-center px-1 py-0.5 mx-0.5 text-[10px] font-medium leading-none rounded bg-muted/50 hover:bg-muted text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+        className="inline-flex items-center justify-center min-w-[1.2rem] px-1 py-0.5 mx-0.5 text-[10px] font-semibold leading-none rounded-full bg-primary/10 hover:bg-primary/20 text-primary cursor-pointer transition-colors"
       >
         [{displayIndex}]
       </button>
