@@ -16,6 +16,12 @@ interface Channel {
   is_member: boolean;
   member_count: number | null;
   connection_id: string | null;
+  /** Status of the parent PlatformConnection at fetch time
+   *  ("connected" / "disconnected" / "error" / "pending"). null for
+   *  orphan channels with no parent connection (CSV-imported, etc.).
+   *  Lets the sidebar render a "needs reconnection" badge instead of
+   *  silently hiding the workspace when status drifts. */
+  connection_status?: string | null;
 }
 
 const COLLAPSED_KEY = "beever-sidebar-groups";
@@ -98,12 +104,24 @@ export function ChannelList() {
     }
 
     // Build ordered list: known connections first, ungrouped last
-    const ordered: { key: string; label: string; platform: string; channels: Channel[] }[] = [];
+    const ordered: {
+      key: string;
+      label: string;
+      platform: string;
+      channels: Channel[];
+      connectionStatus?: string | null;
+    }[] = [];
 
     for (const conn of connections) {
       const chs = groups.get(conn.id);
       if (chs && chs.length > 0) {
-        ordered.push({ key: conn.id, label: conn.display_name, platform: conn.platform, channels: chs });
+        ordered.push({
+          key: conn.id,
+          label: conn.display_name,
+          platform: conn.platform,
+          channels: chs,
+          connectionStatus: conn.status,
+        });
         groups.delete(conn.id);
       }
     }
@@ -229,6 +247,7 @@ export function ChannelList() {
           onToggleCollapse={() => handleToggleCollapse(group.key)}
           isFavorite={isFavorite}
           onToggleFavorite={toggleFavorite}
+          connectionStatus={group.connectionStatus}
         />
       ))}
     </div>

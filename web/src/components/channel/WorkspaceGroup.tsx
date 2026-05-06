@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Hash, ChevronDown, ChevronRight } from "lucide-react";
+import { AlertTriangle, Hash, ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { PlatformIcon } from "@/components/shared/PlatformIcon";
@@ -13,6 +13,7 @@ interface Channel {
   is_member: boolean;
   member_count: number | null;
   connection_id: string | null;
+  connection_status?: string | null;
 }
 
 interface WorkspaceGroupProps {
@@ -24,6 +25,12 @@ interface WorkspaceGroupProps {
   isFavorite: (channelId: string) => boolean;
   onToggleFavorite: (channel: { channel_id: string; connection_id: string | null }) => void;
   showWorkspaceName?: boolean;
+  /** Status of the parent PlatformConnection. When non-null and not
+   *  ``"connected"`` we render a small "needs reconnection" badge in
+   *  the workspace header so the user understands why channels under
+   *  this label may not be live-syncing — instead of silently hiding
+   *  the workspace as the previous behaviour did. */
+  connectionStatus?: string | null;
 }
 
 export function WorkspaceGroup({
@@ -35,7 +42,10 @@ export function WorkspaceGroup({
   isFavorite,
   onToggleFavorite,
   showWorkspaceName,
+  connectionStatus,
 }: WorkspaceGroupProps) {
+  const isDisconnected =
+    connectionStatus != null && connectionStatus !== "connected";
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
 
   const handleToggle = () => {
@@ -58,6 +68,27 @@ export function WorkspaceGroup({
         {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         <PlatformIcon platform={platform} className="w-3.5 h-3.5 shrink-0 opacity-60" />
         <span className="truncate">{label}</span>
+        {isDisconnected && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  data-testid="workspace-disconnected-badge"
+                  className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-medium px-1.5 py-0.5 normal-case tracking-normal"
+                >
+                  <AlertTriangle size={9} />
+                  {connectionStatus}
+                </span>
+              }
+            />
+            <TooltipContent>
+              <span className="text-xs">
+                Connection is{" "}
+                <span className="font-medium">{connectionStatus}</span>. Channels are visible from your last sync — reconnect on the Channels page to resume live sync.
+              </span>
+            </TooltipContent>
+          </Tooltip>
+        )}
         <span className="ml-auto bg-muted/80 text-muted-foreground/60 text-[10px] font-medium tabular-nums px-1.5 py-0.5 rounded-full">{channels.length}</span>
       </button>
 

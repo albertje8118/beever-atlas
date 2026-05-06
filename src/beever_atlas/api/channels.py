@@ -111,6 +111,13 @@ class ChannelResponse(BaseModel):
     connection_id: str | None = None
     primary_language: str | None = None
     primary_language_confidence: float | None = None
+    # Status of the parent PlatformConnection at the time this response
+    # was built — ``"connected"`` / ``"disconnected"`` / ``"error"`` /
+    # ``"pending"`` / ``None`` for orphan channels with no parent
+    # connection. Lets the sidebar render a "disconnected — reconnect"
+    # affordance instead of silently hiding the workspace when a
+    # connection's status drifts away from ``"connected"``.
+    connection_status: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -136,7 +143,10 @@ class MessagesListResponse(BaseModel):
     total_count: int | None = None
 
 
-def _channel_to_response(info: ChannelInfo) -> ChannelResponse:
+def _channel_to_response(
+    info: ChannelInfo,
+    connection_status: str | None = None,
+) -> ChannelResponse:
     return ChannelResponse(
         channel_id=info.channel_id,
         name=info.name,
@@ -146,7 +156,44 @@ def _channel_to_response(info: ChannelInfo) -> ChannelResponse:
         topic=info.topic,
         purpose=info.purpose,
         connection_id=info.connection_id,
+        connection_status=connection_status,
     )
+
+
+async def _synthesize_channels_from_selected(conn) -> list[ChannelInfo]:
+    """Build ``ChannelInfo`` rows from a connection's ``selected_channels``
+    pick-list when the live bridge fetch isn't usable (status != connected,
+    bridge unreachable, token expired). Names are pulled from MongoDB's
+    ``get_channel_display_name`` (last-known name from prior syncs); when
+    that's also empty the channel id is used as the label so the sidebar
+    still has something to render.
+
+    The point: even when a workspace's connection is broken, the user
+    should still see the channels they previously selected, grouped under
+    the workspace label, so they know what they need to reconnect to
+    recover. Silently hiding them sets the user up for the surprise the
+    "Ungrouped tech-studio" report is about.
+    """
+    if not getattr(conn, "selected_channels", None):
+        return []
+    stores = get_stores()
+    name_results = await asyncio.gather(
+        *[stores.mongodb.get_channel_display_name(cid) for cid in conn.selected_channels],
+        return_exceptions=True,
+    )
+    out: list[ChannelInfo] = []
+    for cid, name in zip(conn.selected_channels, name_results):
+        resolved_name = name if isinstance(name, str) and name else cid
+        out.append(
+            ChannelInfo(
+                channel_id=cid,
+                name=resolved_name,
+                platform=conn.platform,
+                is_member=True,  # user explicitly selected → treat as member
+                connection_id=conn.id,
+            )
+        )
+    return out
 
 
 async def _enrich_with_language(resp: ChannelResponse) -> ChannelResponse:
@@ -354,23 +401,45 @@ async def _fetch_file_messages(
 
 @router.get("/api/channels", response_model=list[ChannelResponse])
 async def list_channels() -> list[ChannelResponse]:
-    """List channels from all connected platform connections.
+    """List channels from every platform connection — connected or not.
 
-    Iterates every PlatformConnection with status='connected', fetches
-    channels per-connection in parallel, and filters by each connection's
-    selected_channels list.  One failing connection does not block the others.
+    Behaviour change (2026-05-06): previously this filtered by
+    ``status == "connected"``, which silently hid all channels whose
+    parent connection had drifted to ``disconnected`` / ``error`` /
+    ``expired``. Channels that had been synced once survived via the
+    orphan fallback below with ``connection_id=None`` and got grouped
+    under "Ungrouped" in the sidebar; channels that hadn't been synced
+    yet vanished entirely. The fix:
 
-    Also includes channels that were imported via CSV (have sync state in
-    MongoDB but no platform connection), so they appear in the sidebar.
+      * For ``status == "connected"``: live-fetch via the bridge as
+        before so freshly-added channels in the platform are picked up
+        on next refresh.
+      * For non-connected statuses: synthesise ``ChannelInfo`` rows
+        from ``conn.selected_channels`` directly (using last-known
+        names from MongoDB) so the workspace label and pick-list
+        survive a connection blip. ``connection_status`` on each row
+        carries the truth so the sidebar can render a "disconnected —
+        reconnect to sync" affordance next to the workspace label.
+      * CSV-imported channels with sync state but no parent connection
+        still surface via the orphan path with ``connection_id=None``
+        and ``connection_status=None``.
     """
     from beever_atlas.stores import get_stores
 
     stores = get_stores()
     connections = await stores.platform.list_connections()
-    connected = [c for c in connections if c.status == "connected"]
 
+    # Map channel_id → connection_status so we can stamp each response
+    # with its parent connection's state. ``None`` is reserved for
+    # orphan channels (synced once, parent connection deleted).
+    status_by_channel: dict[str, str] = {}
     all_channels: list[ChannelInfo] = []
 
+    connected = [c for c in connections if c.status == "connected"]
+    other = [c for c in connections if c.status != "connected"]
+
+    # Live-fetch for connected workspaces (gives current channel
+    # membership / topics / member counts).
     if connected:
         tasks = [
             fetch_connection_channels(conn.id, conn.selected_channels, conn.platform)
@@ -385,8 +454,24 @@ async def list_channels() -> list[ChannelResponse]:
                     conn.display_name,
                     result,
                 )
+                # Fall back to the persisted pick-list so the workspace
+                # still appears even when its bridge is briefly down.
+                synthesised = await _synthesize_channels_from_selected(conn)
+                all_channels.extend(synthesised)
+                for ch in synthesised:
+                    status_by_channel[ch.channel_id] = conn.status
                 continue
             all_channels.extend(result)
+            for ch in result:
+                status_by_channel[ch.channel_id] = "connected"
+
+    # Non-connected workspaces — synthesise from the pick-list so the
+    # workspace label persists in the sidebar with a disconnected badge.
+    for conn in other:
+        synthesised = await _synthesize_channels_from_selected(conn)
+        all_channels.extend(synthesised)
+        for ch in synthesised:
+            status_by_channel[ch.channel_id] = conn.status
 
     # Include CSV-imported channels (sync state exists but no connection)
     connected_channel_ids = {ch.channel_id for ch in all_channels}
@@ -408,7 +493,10 @@ async def list_channels() -> list[ChannelResponse]:
                 )
             )
 
-    responses = [_channel_to_response(ch) for ch in all_channels]
+    responses = [
+        _channel_to_response(ch, connection_status=status_by_channel.get(ch.channel_id))
+        for ch in all_channels
+    ]
     # Batch enrich: single $in query instead of N per-channel reads.
     try:
         states_map = await stores.mongodb.get_channel_sync_states_batch(
