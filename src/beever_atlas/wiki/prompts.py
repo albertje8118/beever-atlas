@@ -724,6 +724,238 @@ def build_module_compile_prompt(
     )
 
 
+# ---------------------------------------------------------------------------
+# wiki-narrative-articles — v3 prompt with narrative_sections schema
+# ---------------------------------------------------------------------------
+#
+# v3 extends v2 with a structured ``narrative_sections`` array in the
+# output JSON. The LLM produces both the existing module plan AND a
+# multi-section explanatory article in one response — cost stays at
+# ONE LLM call per topic page (Decision 1 in the design doc).
+#
+# v2 is preserved unchanged because the orchestrator's flag-OFF path
+# uses it; flipping the flag to OFF must roll back to byte-identical
+# v2 behaviour with no orchestrator code change.
+
+MODULE_COMPILE_PROMPT_V3 = """You are an adaptive wiki page compiler. In ONE response, decide which content modules best fit this topic's data shape AND write a multi-section article that EXPLAINS the topic, AND write the page body that uses module markers.
+
+## Module catalog (selection rules)
+
+{module_catalog_block}
+
+## Topic signals (use these to decide module eligibility)
+
+{signals_json}
+
+## Topic data (for prose context — DO NOT re-emit structured data; the renderer fills markers)
+
+Title: {title}
+Summary: {summary}
+Key facts (top 8): {top_facts_json}
+Key contributors: {top_people_json}
+Active period: {date_range_start} – {date_range_end}
+
+{archetype_hint_block}
+
+## Output
+
+Return JSON ONLY with this exact shape:
+
+{{
+  "plan": {{
+    "modules": [
+      {{ "id": "<module_id>", "anchor": "<short alphanumeric>" }},
+      ...
+    ],
+    "media_pins": [
+      {{ "media_id": "<id>", "fact_id": "<id>", "slot": "hero|inline|gallery" }}
+    ]
+  }},
+  "tldr": "<single bold sentence — the key insight>",
+  "overview": "<2-3 sentence prose framing what the topic is, why it matters, and current state>",
+  "narrative_sections": [
+    {{
+      "anchor": "<kebab-case>",
+      "heading": "<Human readable section title>",
+      "paragraphs": [
+        {{
+          "text": "<paragraph prose with [f_xxx] inline citations>",
+          "citations": ["f_xxx", "f_yyy"],
+          "is_inference": false
+        }}
+      ],
+      "visual": null
+    }}
+  ],
+  "body": "<markdown body containing module markers + short connector prose>"
+}}
+
+## Narrative-article rules (the new heart of the page)
+
+The `narrative_sections` array is the new SPOTLIGHT of every page — a multi-section article that EXPLAINS the topic the way Wikipedia, DeepWiki, or Notion would. The existing modules become a Reference & Evidence appendix below.
+
+**Section structure**:
+- Each section has a unique `anchor` (kebab-case, ≤ 24 chars), a `heading` (human readable, sentence case), and a `paragraphs` array.
+- Section titles MUST emerge from the cluster's actual content. Do NOT pick from a fixed template menu. Examples of good content-driven titles: "Integrate OpenClaw with Beever Atlas", "Mattermost as the primary platform", "Future BigQuery integration". Bad titles (template bias): "Context", "Overview", "Background" when the data does not support that framing.
+- Sections render in the order you list them — put foundational / definitional sections first; forward-looking / open-questions sections last.
+- Aim for 3-7 sections per page. 1-2 sections reads as a stub; 8+ sections reads as a kitchen sink.
+
+**Paragraph structure**:
+- Each paragraph is 3-5 sentences. Active voice. Short.
+- `text`: the paragraph prose. State insights and conclusions directly — synthesise, don't narrate.
+- `citations`: array of fact_ids cited inline within `text`. Format inline as `[f_xxx]` so the frontend renders citation chips.
+- `is_inference`: set to `true` for SYNTHESIS paragraphs that interpret beyond direct facts (e.g., "These decisions together suggest a shift toward enterprise"). Inference paragraphs MUST still cite ≥1 fact_id grounding the inference — uncited inference is hallucination and will be dropped.
+
+**Citation discipline (HARD RULES)**:
+- EVERY paragraph MUST cite at least one fact_id. Uncited paragraphs are DROPPED by the validator.
+- Inference paragraphs (`is_inference: true`) MUST still cite ≥1 fact_id.
+- FORBIDDEN narration phrases (paragraphs containing these are DROPPED): "shared a link", "shared an article", "noted that", "mentioned that", "posted about", "presented that". Do NOT write activity-log narration.
+- GOOD: "The team adopted Authlib for OAuth/OIDC because of its modern OIDC discovery [f_1]."
+- BAD: "Thomas Chong shared a link to Authlib [f_1]."
+- The article's overall citation coverage MUST be ≥ 80% — articles below that threshold are REJECTED and the page falls back to module-only rendering.
+
+**Word caps**:
+- Each section: 150-400 words. Sections over 400 words are TRUNCATED at sentence boundary.
+- Total article: 1,500-3,000 words for typical topic pages, up to 5,000 for landmark pages (channel overview). The validator HARD-rejects articles over 6,000 words.
+- Be concise like a Wikipedia editor — every paragraph adds new information. NO padding.
+
+**Optional supporting visual per section**:
+- Each section MAY include at most ONE visual via the `visual` field. Use ONLY when the visual genuinely helps comprehension; otherwise set `visual: null`.
+- Allowed kinds: `table` (comparison/data), `mermaid` (architecture/flow), `list` (enumeration), `callout` (warnings/tips), `code` (technical content), `blockquote` (important statements).
+- Visual shape:
+  - `{{"kind": "table", "content": {{"headers": ["A", "B"], "rows": [["1", "2"]]}}}}`
+  - `{{"kind": "mermaid", "content": "graph TD\\n  A --> B"}}`
+  - `{{"kind": "list", "content": {{"ordered": false, "items": ["one", "two"]}}}}`
+  - `{{"kind": "callout", "content": {{"variant": "warning|info|tip", "text": "..."}}}}`
+  - `{{"kind": "code", "content": {{"language": "python", "code": "..."}}}}`
+  - `{{"kind": "blockquote", "content": "..."}}`
+- Visuals sit INLINE within the section, not at the article footer.
+
+**Agent voice**:
+- Third-person synthetic voice. Wikipedia-editor style. NO "I", "we", "our".
+- Short paragraphs (3-5 sentences). Active voice. Active verbs name the outcome.
+- No jargon without explanation. Define acronyms on first use.
+- NO "shared a link" / "noted that" narration — see forbidden phrases above.
+- Cite every claim with [f_xxx] inline.
+
+## Worked examples
+
+GOOD section (Topic archetype, content-driven title):
+```
+{{
+  "anchor": "openclaw-integration",
+  "heading": "Integrate OpenClaw with Beever Atlas",
+  "paragraphs": [
+    {{
+      "text": "The team chose OpenClaw as the primary chat connector for Atlas, replacing the prior Mattermost-only adapter [f_12]. OpenClaw provides a unified push-source webhook layer covering Slack, Discord, and Teams in one HMAC-signed contract [f_15].",
+      "citations": ["f_12", "f_15"],
+      "is_inference": false
+    }},
+    {{
+      "text": "This shift positions Atlas as a connector-agnostic memory layer; the IP shifts upward to the wiki + memory architecture, leaving connectors as commodity infrastructure [f_12].",
+      "citations": ["f_12"],
+      "is_inference": true
+    }}
+  ],
+  "visual": null
+}}
+```
+
+BAD section (template-bias, uncited paragraphs — DO NOT EMIT):
+```
+{{
+  "anchor": "context",
+  "heading": "Context",
+  "paragraphs": [
+    {{
+      "text": "This topic discusses several important decisions about architecture and connectors.",
+      "citations": [],
+      "is_inference": false
+    }}
+  ]
+}}
+```
+The bad example fails on three counts: (1) generic template title, (2) uncited paragraph (will be dropped), (3) vague filler that adds no information.
+
+## Module-selection rules
+
+- **HARD RULE — Module #1 in your plan MUST be `hero_summary` unless `fact_count` is 0.** The hero_summary frontend module reads your `tldr` and `overview` to render the page header (bold TL;DR + summary + stat strip).
+- **HARD RULE — When `narrative_sections` has at least one validated section, include `narrative_article` IMMEDIATELY AFTER `hero_summary` (module #2).** The article is the new spotlight; existing modules become the appendix.
+- **HARD RULE — When `archetype == "decision"`, include `decision_banner` after `narrative_article`.**
+- **HARD RULE — When `tension_count` ≥ 1, include `tension_callout` after `decision_banner` (or after `narrative_article` on Topic-archetype pages).**
+- **HARD RULE — When `numeric_fact_count` ≥ 3, place `stat_strip` near the top (after the spotlight modules).**
+- **HARD RULE — The LAST module in your plan MUST be `provenance_drawer` whenever `fact_count` ≥ 1.** Place it AFTER `related_threads` (or at the very end).
+- **HARD RULE — When `glossary_terms_used` ≥ 2, include `acronym_legend` near the END of the page (just before `provenance_drawer`).**
+- **HARD RULE — When `child_count` ≥ 1, include `subpage_cards` AFTER the spine modules and BEFORE `related_threads`.**
+- Pick **3 to 7 modules** total (excluding the always-present hero_summary + provenance_drawer + narrative_article).
+- A module is ELIGIBLE only when its selection rule (in the catalog above) is satisfied.
+- Anchors are lowercase + alphanumeric + dashes, ≤ 24 chars.
+
+## Body authoring rules
+
+- The body MUST contain one ``<<MODULE:<id>>>`` marker per module in your plan, in plan order.
+- Optionally include a 1-2 sentence connector paragraph BEFORE each marker.
+- Do NOT re-emit structured data the modules render.
+- Do NOT write a "Sources" or "References" section.
+- Do NOT use @ / # / $ entity prefixes — write names normally.
+
+## Hard rules
+
+- Output JSON ONLY. No markdown fences around the outer JSON. No prose before or after the outer object.
+- TL;DR is exactly ONE sentence, bolded with `**…**`.
+- Overview is 2-3 sentences. No more.
+- Body word count ≤ 350 (excluding markers + connector prose). The narrative ARTICLE carries the deep prose; the body just glues markers together.
+- If you cannot produce a quality narrative (extreme thin-data topic with < 4 facts), emit `narrative_sections: []` and rely on module-only rendering.
+"""
+
+
+def build_module_compile_prompt_v3(
+    *,
+    signals: dict,
+    module_catalog: list[dict],
+    title: str,
+    summary: str,
+    top_facts: list[dict],
+    top_people: list[dict],
+    date_range_start: str = "",
+    date_range_end: str = "",
+    archetype_hint_block: str = "",
+) -> str:
+    """Render ``MODULE_COMPILE_PROMPT_V3`` with topic context + the
+    optional archetype-hint block.
+
+    Single-call: planner + writer + narrative author collapsed into
+    one prompt so cost stays at 1 LLM call per topic page (Decision 1
+    in ``openspec/changes/wiki-narrative-articles/design.md``).
+
+    ``archetype_hint_block`` is an optional pre-rendered Markdown block
+    (typically populated by Session C — Decision/Tension/Folder/Channel
+    Overview archetypes) that nudges the LLM toward a typical section
+    structure for that archetype. Topic archetype gets the empty
+    string — sections come entirely from cluster content (Decision 2).
+    """
+    import json as _json
+
+    catalog_lines: list[str] = []
+    for entry in module_catalog:
+        catalog_lines.append(
+            f"- **{entry['id']}** ({entry['label']}) — {entry['description']} "
+            f"_Rule:_ {entry['rule']}"
+        )
+    catalog_block = "\n".join(catalog_lines)
+    return MODULE_COMPILE_PROMPT_V3.format(
+        module_catalog_block=catalog_block,
+        signals_json=_json.dumps(signals, indent=2, default=str),
+        title=title,
+        summary=summary,
+        top_facts_json=_json.dumps(top_facts[:8], indent=2, default=str),
+        top_people_json=_json.dumps(top_people[:6], indent=2, default=str),
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        archetype_hint_block=archetype_hint_block or "",
+    )
+
+
 MODULE_COMPILE_FOLDER_PROMPT = """You are an adaptive wiki page compiler. The page is a FOLDER INDEX — a wayfinding + dashboard layer over the descendant pages. In ONE response, decide which folder modules to render AND author the bold TL;DR + 2-3 sentence summary that frame the folder.
 
 ## Module catalog (folder-archetype subset — selection rules)
