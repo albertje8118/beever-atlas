@@ -108,9 +108,10 @@ function parseFaqMarkdown(raw: string | null | undefined): ParsedFaq {
   for (let idx = 0; idx < lines.length; idx += 1) {
     const line = lines[idx];
 
-    // Heading detection — h2 or h3 starts a new section UNLESS it's
-    // the FAQ wrapper phrase (then we just skip it without resetting
-    // the section, so its body inherits the next real heading).
+    // Heading detection — h2 / h3 / h4. The role depends on the
+    // heading text: a heading ending with ``?`` is a QUESTION (the
+    // current FAQ_PROMPT drift emits questions as h3 headings);
+    // otherwise it's a section / topic title.
     const headingMatch = line.match(/^(#{2,4})\s+(.+?)\s*$/);
     if (headingMatch) {
       const title = headingMatch[2].trim();
@@ -133,6 +134,16 @@ function parseFaqMarkdown(raw: string | null | undefined): ParsedFaq {
       // children under the next real heading.
       if (WRAPPER_RE.test(title)) {
         flushSection();
+        continue;
+      }
+
+      // Heading-as-question: the current FAQ_PROMPT shape emits
+      // each question as ``### Question?`` (h3 ending with ``?``).
+      // Treat these as questions, not topic dividers, so card
+      // rendering works without a separate ``**Q?**`` bold marker.
+      if (/\?\s*$/.test(title) && currentTitle !== null) {
+        flushPendingQA();
+        pendingQuestion = title;
         continue;
       }
 
