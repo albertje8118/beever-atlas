@@ -691,6 +691,74 @@ GENERIC_GLOSSARY_TERMS: set[str] = {
 }
 
 
+def _normalize_faq_content(content: str) -> str:
+    """Rewrite drift-form questions into the canonical ``**Q: ?**`` shape.
+
+    The FAQ_PROMPT contract is explicit ("Each topic group MUST be a ##
+    heading. Individual Q&A pairs use bold **Q:** formatting on their
+    own line"), but the LLM occasionally drifts to ``### Question?`` h3
+    form or ``**Question?**`` bare-bold form. Normalising here
+    guarantees:
+      * Persisted markdown has a single shape regardless of LLM output.
+      * Search and MCP read tools see consistent ``**Q:`` markers.
+      * Frontend parser falls into Path A (canonical) instead of the
+        drift-detection paths.
+
+    The rules:
+      * ``### Question text?`` (h3 ending with ``?``) →
+        ``**Q: Question text?**\\n\\nA:``  (the rest of the line block
+        becomes the answer).
+      * ``**Question text?**`` standalone bold line ending with ``?``
+        → ``**Q: Question text?**`` (just adds the ``Q:`` prefix).
+      * ``## Topic`` and ``## Topic?`` (statement-form, no ``?`` OR
+        question-form on h2) are left alone — those are topic
+        dividers, not questions, and are followed by Q&A pairs below.
+
+    Idempotent: re-running on already-canonical content is a no-op.
+    """
+    if not content:
+        return content
+
+    out_lines: list[str] = []
+    in_q_block = False
+    for line in content.split("\n"):
+        # h3-form question: ``### Question text?``
+        m_h3q = re.match(r"^###\s+(.+\?)\s*$", line)
+        if m_h3q:
+            out_lines.append(f"**Q: {m_h3q.group(1).strip()}**")
+            out_lines.append("")
+            out_lines.append("A:")  # answer paragraph follows on next line
+            in_q_block = True
+            continue
+
+        # Bare-bold question: ``**Question text?**``
+        m_boldq = re.match(r"^\*\*([^*]+\?)\*\*\s*$", line)
+        if m_boldq and not m_boldq.group(1).startswith("Q:"):
+            out_lines.append(f"**Q: {m_boldq.group(1).strip()}**")
+            out_lines.append("")
+            out_lines.append("A:")
+            in_q_block = True
+            continue
+
+        # Heading line — closes any in-progress Q block before the
+        # next topic divider.
+        if re.match(r"^#{1,4}\s+", line):
+            in_q_block = False
+            out_lines.append(line)
+            continue
+
+        # If we just emitted ``A:`` and the next non-blank line is the
+        # answer prose, glue them onto the same paragraph the
+        # frontend parser expects ("A: <prose>").
+        if in_q_block and line.strip() and out_lines and out_lines[-1] == "A:":
+            out_lines[-1] = f"A: {line.strip()}"
+            continue
+
+        out_lines.append(line)
+
+    return "\n".join(out_lines)
+
+
 def _faq_fallback(faq_by_topic: list[dict], clusters: list) -> tuple[str, str]:
     """Render a minimal FAQ page from structured inputs when the LLM fails.
 
@@ -3997,6 +4065,13 @@ class WikiCompiler:
         if not content.strip():
             logger.info("WikiCompiler: FAQ LLM returned empty, using deterministic fallback")
             content, summary = _faq_fallback(faq_by_topic, clusters)
+        # Normalise heading-as-question / bare-bold-question forms into
+        # the canonical ``**Q: ... ?**`` / ``A:`` block before persisting.
+        # The frontend FaqPage parser tolerates several shapes, but
+        # canonicalising here keeps the persisted markdown predictable
+        # and downstream consumers (search, MCP read tools) see a
+        # single shape regardless of LLM drift.
+        content = _normalize_faq_content(content)
         return WikiPage(
             id="faq",
             slug="faq",

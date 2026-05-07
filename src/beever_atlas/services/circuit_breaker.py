@@ -43,6 +43,16 @@ who need to tune this should change the constant here. The
 is the operator-facing knob for breaker sensitivity."""
 
 
+_DEFAULT_HALF_OPEN_PROBE_TIMEOUT: int = 120
+"""Maximum seconds the breaker stays in ``half_open`` waiting for a
+probe outcome. If the probing call never completes (worker crash,
+event-loop cancellation, blocking SDK swallowing the asyncio task),
+without this lease ``half_open`` would deny every subsequent
+``allow()`` until process restart. After this elapses, ``allow()``
+auto-rolls the state back to ``open`` with a fresh cooldown so the
+next caller can re-probe normally."""
+
+
 @dataclass
 class CircuitBreakerSnapshot:
     """Read-only snapshot of breaker state for observability endpoints."""
@@ -84,13 +94,16 @@ class CircuitBreaker:
         threshold: int = 5,
         cooldown_seconds: int = 60,
         provider_label: str = "gemini",
+        half_open_probe_timeout: int = _DEFAULT_HALF_OPEN_PROBE_TIMEOUT,
     ) -> None:
         self._threshold = threshold
         self._cooldown_seconds = cooldown_seconds
+        self._half_open_probe_timeout = half_open_probe_timeout
         self._provider_label = provider_label
         self._state: BreakerState = "closed"
         self._consecutive_failures: int = 0
         self._opened_at: float | None = None
+        self._half_open_at: float | None = None
         self._last_transition: str | None = None
         # Eagerly create the lock. ``asyncio.Lock()`` has not required a
         # running event loop since Python 3.10 and this project requires
@@ -119,12 +132,28 @@ class CircuitBreaker:
                     return False
                 if time.monotonic() - self._opened_at >= self._cooldown_seconds:
                     self._transition("open", "half_open")
+                    self._half_open_at = time.monotonic()
                     return True
                 return False
             # half_open: only one probe at a time. If two callers race,
             # the first holds the lock and gets through; the second sees
             # state==half_open but cannot also probe, so we deny here
             # and the first probe's outcome will move the state next.
+            #
+            # Recovery from a stuck probe: if the probe caller never
+            # records a success or failure (worker crash, cancelled task,
+            # swallowed exception), without a lease the breaker would
+            # deny every subsequent ``allow()`` indefinitely. After
+            # ``half_open_probe_timeout`` elapses, roll back to ``open``
+            # with a fresh cooldown so the next caller can re-probe.
+            if (
+                self._half_open_at is not None
+                and time.monotonic() - self._half_open_at
+                >= self._half_open_probe_timeout
+            ):
+                self._transition("half_open", "open")
+                self._opened_at = time.monotonic()
+                self._half_open_at = None
             return False
 
     async def record_success(self) -> None:

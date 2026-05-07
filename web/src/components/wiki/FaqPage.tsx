@@ -1,5 +1,13 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useMemo, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  HelpCircle,
+  Search,
+  X,
+} from "lucide-react";
 import { WikiMarkdown } from "./WikiMarkdown";
 import { CitationPanel } from "./CitationPanel";
 import type { WikiPage, WikiCitation } from "@/lib/types";
@@ -256,13 +264,25 @@ function parseQAPairs(body: string): QAPair[] {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function QACard({ qa, citations }: { qa: QAPair; citations: WikiCitation[] }) {
-  const [open, setOpen] = useState(true);
+function QACard({
+  qa,
+  citations,
+  forceOpen,
+}: {
+  qa: QAPair;
+  citations: WikiCitation[];
+  /** When the parent toggles "Expand all" / "Collapse all" we
+   *  pass a forced state through this prop. ``undefined`` means
+   *  the card uses its own local toggle. */
+  forceOpen?: boolean;
+}) {
+  const [localOpen, setLocalOpen] = useState(true);
+  const open = forceOpen !== undefined ? forceOpen : localOpen;
 
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden transition-all">
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => setLocalOpen(!open)}
         className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors group"
       >
         <span className="shrink-0 mt-0.5 text-primary transition-transform">
@@ -281,15 +301,37 @@ function QACard({ qa, citations }: { qa: QAPair; citations: WikiCitation[] }) {
   );
 }
 
-function FaqSection({ section, citations }: { section: FaqSection; citations: WikiCitation[] }) {
+function FaqSection({
+  section,
+  citations,
+  forceOpen,
+}: {
+  section: FaqSection;
+  citations: WikiCitation[];
+  forceOpen?: boolean;
+}) {
+  const slug = section.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   return (
-    <section>
-      <h2 className="text-lg font-semibold text-foreground mt-6 mb-3 scroll-mt-6">
-        {section.title}
-      </h2>
+    <section className="mt-8">
+      <div
+        id={slug}
+        className="flex items-baseline gap-2 mb-3 scroll-mt-6 border-b border-border/60 pb-1.5"
+      >
+        <h2 className="text-base font-semibold text-foreground">
+          {section.title}
+        </h2>
+        <span className="inline-flex items-center rounded-full bg-muted/60 text-muted-foreground text-[10px] font-medium px-1.5 py-0.5 tabular-nums">
+          {section.pairs.length}
+          {" "}
+          {section.pairs.length === 1 ? "question" : "questions"}
+        </span>
+      </div>
       <div className="flex flex-col gap-2">
         {section.pairs.map((qa, i) => (
-          <QACard key={i} qa={qa} citations={citations} />
+          <QACard key={i} qa={qa} citations={citations} forceOpen={forceOpen} />
         ))}
       </div>
     </section>
@@ -306,13 +348,52 @@ interface FaqPageProps {
 
 export function FaqPage({ page, onNavigate, lang }: FaqPageProps) {
   const { preamble, sections, trailer } = parseFaqMarkdown(page.content);
+  const [query, setQuery] = useState("");
+  const [forceOpen, setForceOpen] = useState<boolean | undefined>(undefined);
+
+  // Filter sections + pairs by query (matches both question and answer
+  // text, case-insensitive). Empty query = all sections rendered.
+  const filteredSections = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sections;
+    const out: FaqSection[] = [];
+    for (const section of sections) {
+      const matchedPairs = section.pairs.filter(
+        (qa) =>
+          qa.question.toLowerCase().includes(q) ||
+          qa.answer.toLowerCase().includes(q),
+      );
+      const sectionTitleMatches = section.title.toLowerCase().includes(q);
+      if (sectionTitleMatches) {
+        // If the section title itself matches, keep ALL its pairs
+        // (the user is filtering by topic).
+        out.push({ title: section.title, pairs: section.pairs });
+      } else if (matchedPairs.length > 0) {
+        out.push({ title: section.title, pairs: matchedPairs });
+      }
+    }
+    return out;
+  }, [sections, query]);
+
+  const totalQuestions = sections.reduce((n, s) => n + s.pairs.length, 0);
+  const filteredQuestions = filteredSections.reduce(
+    (n, s) => n + s.pairs.length,
+    0,
+  );
 
   return (
     <div>
       <h1 className="text-2xl font-bold text-foreground">{page.title}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        {wikiT(lang, "memoriesSuffix", { n: page.memory_count })}
-      </p>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+        <span>{wikiT(lang, "memoriesSuffix", { n: page.memory_count })}</span>
+        {totalQuestions > 0 && (
+          <span className="inline-flex items-center gap-1">
+            <HelpCircle className="h-3.5 w-3.5" aria-hidden="true" />
+            {totalQuestions} {totalQuestions === 1 ? "question" : "questions"}
+            {sections.length > 1 && ` across ${sections.length} topics`}
+          </span>
+        )}
+      </div>
 
       {/* Preamble: chart + intro sentence */}
       {preamble && (
@@ -321,15 +402,88 @@ export function FaqPage({ page, onNavigate, lang }: FaqPageProps) {
         </div>
       )}
 
+      {/* Toolbar — search + expand/collapse all. Only renders when there
+          are real Q&A sections; for empty/fallback FAQs the toolbar
+          would have nothing meaningful to do. */}
+      {sections.length > 0 && (
+        <div
+          data-testid="faq-toolbar"
+          className="mt-6 mb-2 flex flex-wrap items-center gap-2"
+        >
+          <div className="relative flex-1 min-w-[200px]">
+            <Search
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/60 pointer-events-none"
+              aria-hidden="true"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search questions or answers…"
+              className="w-full bg-card border border-border rounded-md pl-8 pr-8 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/60"
+              data-testid="faq-search-input"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-muted/40"
+                aria-label="Clear search"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setForceOpen(forceOpen === true ? undefined : true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card hover:bg-muted/40 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+            data-testid="faq-expand-all"
+          >
+            <ChevronsUpDown className="h-3.5 w-3.5" />
+            Expand all
+          </button>
+          <button
+            type="button"
+            onClick={() => setForceOpen(forceOpen === false ? undefined : false)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card hover:bg-muted/40 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+            data-testid="faq-collapse-all"
+          >
+            <ChevronsDownUp className="h-3.5 w-3.5" />
+            Collapse all
+          </button>
+        </div>
+      )}
+
+      {/* Search-result summary line */}
+      {sections.length > 0 && query && (
+        <p
+          className="text-xs text-muted-foreground mb-3"
+          data-testid="faq-search-summary"
+        >
+          {filteredQuestions > 0
+            ? `Showing ${filteredQuestions} of ${totalQuestions} questions matching "${query}"`
+            : `No questions match "${query}"`}
+        </p>
+      )}
+
       {/* Q&A sections */}
-      {sections.length > 0 ? (
+      {filteredSections.length > 0 ? (
         <div className="mt-2 divide-y divide-border/0">
-          {sections.map((section, i) => (
-            <div key={i}>
-              <FaqSection section={section} citations={page.citations} />
-              {i < sections.length - 1 && <hr className="border-border mt-6" />}
-            </div>
+          {filteredSections.map((section, i) => (
+            <FaqSection
+              key={i}
+              section={section}
+              citations={page.citations}
+              forceOpen={forceOpen}
+            />
           ))}
+        </div>
+      ) : sections.length > 0 ? (
+        /* Sections exist but all filtered out by query — show empty
+         * search state instead of falling through to markdown. */
+        <div className="mt-6 rounded-lg border border-dashed border-border bg-muted/10 px-6 py-10 text-center text-sm text-muted-foreground">
+          No questions match your search.
         </div>
       ) : page.content ? (
         /* Fallback: render as plain markdown if parsing finds no structured Q&As */

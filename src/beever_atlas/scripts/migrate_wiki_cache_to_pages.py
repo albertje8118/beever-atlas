@@ -185,6 +185,17 @@ async def _migrate(args: argparse.Namespace) -> None:
     state_coll = db["migration_state"]
     default_lang = settings.default_target_language or "en"
 
+    # ``wiki_pages`` indexes are owned by ``WikiPageStore.ensure_indexes`` and
+    # the FastAPI app lifespan calls them on startup. The CLI bypasses that
+    # lifespan, so on a fresh database the compound unique index on
+    # ``(channel_id, target_lang, page_id)`` would not exist and re-running
+    # the migration after a partial failure could insert duplicate rows.
+    # Ensure the indexes here before the upsert loop so idempotency holds.
+    from beever_atlas.wiki.page_store import WikiPageStore
+
+    page_store = WikiPageStore(db=db)
+    await page_store.ensure_indexes()
+
     state = await state_coll.find_one({"_id": _STATE_KEY})
     last_processed_id = state.get("last_processed_id") if state else None
 

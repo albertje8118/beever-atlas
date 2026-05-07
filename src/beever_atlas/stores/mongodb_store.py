@@ -975,39 +975,59 @@ class MongoDBStore:
         does not write status (initial ``pending`` lands via ``$setOnInsert``
         in :meth:`upsert_channel_messages`).
         """
+        # Encode the legal-from-states for ``new_status`` directly in the
+        # Mongo filter so the validation + write happens as a single atomic
+        # operation. A previous read-then-write split lost concurrent
+        # transitions: two workers both read ``extracting``, the first wrote
+        # ``done``, the second's ``update_one`` (which lacked a status filter)
+        # then clobbered ``done`` back to ``failed``.
+        allowed_from = {
+            state
+            for state, allowed in EXTRACTION_STATUS_TRANSITIONS.items()
+            if new_status in allowed
+        }
+        # Treat a no-op transition (``new_status == from_status``) as success
+        # — preserves prior behaviour for idempotent retries.
+        allowed_from.add(new_status)
+        update_set: dict[str, Any] = {
+            "extraction_status": new_status,
+            "updated_at": datetime.now(tz=UTC),
+        }
+        if last_error is not None:
+            update_set["last_error"] = last_error
+        if next_attempt_at is not None:
+            update_set["next_attempt_at"] = next_attempt_at
+        update_doc: dict[str, Any] = {"$set": update_set}
+        if new_status == "failed":
+            update_doc["$inc"] = {"attempt_count": 1}
+        result = await self._channel_messages.find_one_and_update(
+            {
+                "source_id": source_id,
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "extraction_status": {"$in": list(allowed_from)},
+            },
+            update_doc,
+        )
+        if result is not None:
+            return True
+        # Filter missed: either the row doesn't exist or it's in a state from
+        # which the transition is illegal. A second cheap read disambiguates
+        # so ops still get the warning that surfaced the issue before.
         existing = await self._channel_messages.find_one(
             {"source_id": source_id, "channel_id": channel_id, "message_id": message_id},
-            projection={"extraction_status": 1, "attempt_count": 1},
+            projection={"extraction_status": 1},
         )
-        if existing is None:
-            return False
-        from_status = existing.get("extraction_status", "pending")
-        allowed = EXTRACTION_STATUS_TRANSITIONS.get(from_status, set())
-        if new_status not in allowed and new_status != from_status:
+        if existing is not None:
             logger.warning(
                 "channel_messages: rejected illegal transition %s -> %s for %s/%s/%s",
-                from_status,
+                existing.get("extraction_status", "pending"),
                 new_status,
                 source_id,
                 channel_id,
                 message_id,
             )
-            return False
-        update: dict[str, Any] = {
-            "extraction_status": new_status,
-            "updated_at": datetime.now(tz=UTC),
-        }
-        if last_error is not None:
-            update["last_error"] = last_error
-        if next_attempt_at is not None:
-            update["next_attempt_at"] = next_attempt_at
-        if new_status == "failed":
-            update["attempt_count"] = int(existing.get("attempt_count", 0)) + 1
-        await self._channel_messages.update_one(
-            {"source_id": source_id, "channel_id": channel_id, "message_id": message_id},
-            {"$set": update},
-        )
-        return True
+        return False
 
     # ------------------------------------------------------------------
     # Message Store: ExtractionWorker primitives

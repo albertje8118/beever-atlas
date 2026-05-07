@@ -291,13 +291,20 @@ def _extract_media_for_module(
                 continue
             kind = (m.get("kind") or "").lower()
             url = m.get("url") or ""
+            host = _safe_hostname(url)
+            is_video_host = (
+                host == "youtube.com"
+                or host.endswith(".youtube.com")
+                or host == "youtu.be"
+                or host == "vimeo.com"
+                or host.endswith(".vimeo.com")
+            )
             if kind == "link" or (
                 url.startswith("http")
                 and not url.lower().endswith(
                     (".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".mp4", ".webm")
                 )
-                and "youtube.com" not in url.lower()
-                and "vimeo.com" not in url.lower()
+                and not is_video_host
             ):
                 items.append(
                     {

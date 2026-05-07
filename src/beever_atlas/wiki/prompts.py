@@ -367,6 +367,37 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 - Place a `---` horizontal rule after each topic group's last Q&A (before the next ## heading or the Related pages section). Do NOT place `---` between individual Q&A pairs within the same section.
 - Use ONLY inline [N] markers for citations. Do NOT generate any source list, reference section, citation block, or numbered bibliography — the UI renders citations separately. FORBIDDEN at end of content: `## Sources`, `### Sources`, `- [1] @Author...`, `[1]: Author...`.
 
+## Output schema example (follow this shape EXACTLY)
+The body — after the optional chart + intro — looks like this. Note the
+``**Q:`` prefix on every question and the absence of ``### `` headings:
+
+```
+## Authentication & Access
+**Q: What auth method does the bot use?**
+
+A: The bot authenticates via OAuth tokens issued per workspace, stored
+encrypted in the credentials store [1]. Tokens are refreshed automatically
+when within 24h of expiry [2].
+
+**Q: How do I rotate the bridge API key?**
+
+A: Run `make rotate-bridge-key` and update `BRIDGE_API_KEY` in your `.env`
+file. The bot picks up the new value on its next startup cycle [3].
+
+---
+
+## Deployment
+**Q: Which database does the wiki cache live in?**
+
+A: MongoDB collection ``wiki_pages`` keyed by ``(channel_id, page_id)``.
+The legacy ``wiki_cache`` doc is kept as a dual-read fallback [1].
+```
+
+FORBIDDEN shapes (the parser cannot recover these as cards):
+* ``### What is the auth method?`` (h3-as-question)
+* ``**What is the auth method?**`` (bold-without-Q-prefix)
+* ``Q: ... A: ...`` on a single line
+
 ## Data
 FAQ candidates (grouped by topic): {faq_candidates_json}
 Topic names for reference: {topic_names_json}
