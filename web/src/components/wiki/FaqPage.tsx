@@ -64,8 +64,8 @@ function parseFaqMarkdown(raw: string | null | undefined): ParsedFaq {
   const WRAPPER_RE = /^(frequently\s+asked\s+questions?|faqs?|q\s*&?\s*a)$/i;
 
   const sections: FaqSection[] = [];
-  let preambleLines: string[] = [];
-  let trailerLines: string[] = [];
+  const preambleLines: string[] = [];
+  const trailerLines: string[] = [];
   let trailerStarted = false;
 
   // Current state during the walk.

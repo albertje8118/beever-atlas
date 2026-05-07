@@ -148,8 +148,7 @@ class CircuitBreaker:
             # with a fresh cooldown so the next caller can re-probe.
             if (
                 self._half_open_at is not None
-                and time.monotonic() - self._half_open_at
-                >= self._half_open_probe_timeout
+                and time.monotonic() - self._half_open_at >= self._half_open_probe_timeout
             ):
                 self._transition("half_open", "open")
                 self._opened_at = time.monotonic()
