@@ -38,7 +38,25 @@ function parseFaqMarkdown(raw: string | null | undefined): ParsedFaq {
     return { preamble: "", sections: [], trailer: "" };
   }
   // Strip leading h1 (title rendered separately)
-  const content = raw.replace(/^#\s+[^\n]+\n*/, "");
+  let content = raw.replace(/^#\s+[^\n]+\n*/, "");
+
+  // The prompt sometimes drifts to wrapping all sections inside a
+  // single ``## Frequently Asked Questions`` outer heading, then
+  // emitting topic groups as ``### `` h3s. Detect that shape and
+  // demote the inner h3s to h2 so the rest of the parser sees the
+  // expected ``## Topic`` structure. Heuristic: if the first ``## ``
+  // heading's title matches the FAQ wrapper phrase AND no other
+  // ``## `` follows, demote ``### `` → ``## ``.
+  const wrapperMatch = content.match(
+    /^##\s+(frequently\s+asked\s+questions?|faqs?)\s*$/im,
+  );
+  const additionalH2s = (content.match(/^##\s+/gm) || []).length;
+  if (wrapperMatch && additionalH2s <= 1 && /^###\s/m.test(content)) {
+    // Drop the wrapper heading entirely and demote h3s to h2.
+    content = content
+      .replace(/^##\s+(frequently\s+asked\s+questions?|faqs?)\s*\n?/im, "")
+      .replace(/^###\s/gm, "## ");
+  }
 
   // Split on ## headings — first chunk is the preamble (chart + intro)
   const chunks = content.split(/^(?=##\s)/m);
