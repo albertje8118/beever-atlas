@@ -71,27 +71,67 @@ function parseFaqMarkdown(raw: string | null | undefined): ParsedFaq {
 function parseQAPairs(body: string): QAPair[] {
   const pairs: QAPair[] = [];
 
-  // Split on **Q: ... ** patterns (the question bold marker)
-  // Handles: **Q: text** or **Q: text**\n
-  const blocks = body.split(/(?=\*\*Q:\s)/);
-
-  for (const block of blocks) {
-    const qMatch = block.match(/^\*\*Q:\s*([\s\S]*?)\*\*/);
-    if (!qMatch) continue;
-
-    const question = qMatch[1].replace(/\n/g, " ").trim();
-    const rest = block.slice(qMatch[0].length).trim();
-
-    // Strip leading "A:" or "**A:**" label
-    const answer = rest
-      .replace(/^\*\*A:\*\*\s*/m, "")
-      .replace(/^A:\s*/m, "")
-      .replace(/^---\s*$/gm, "") // strip inline hr separators
-      .trim();
-
-    if (question && answer) {
-      pairs.push({ question, answer });
+  // Path A — canonical ``**Q: text** / A: answer`` form (FAQ_PROMPT
+  // contract). Detected first so the legacy persistence keeps working.
+  if (/\*\*Q:\s/.test(body)) {
+    const blocks = body.split(/(?=\*\*Q:\s)/);
+    for (const block of blocks) {
+      const qMatch = block.match(/^\*\*Q:\s*([\s\S]*?)\*\*/);
+      if (!qMatch) continue;
+      const question = qMatch[1].replace(/\n/g, " ").trim();
+      const rest = block.slice(qMatch[0].length).trim();
+      const answer = rest
+        .replace(/^\*\*A:\*\*\s*/m, "")
+        .replace(/^A:\s*/m, "")
+        .replace(/^---\s*$/gm, "")
+        .trim();
+      if (question && answer) {
+        pairs.push({ question, answer });
+      }
     }
+    return pairs;
+  }
+
+  // Path B — ``### Question?\n\nAnswer paragraph`` form. Modern
+  // prompts have drifted to emitting questions as h3 headings with
+  // free-form prose underneath; without this path the FaqPage falls
+  // through to plain markdown rendering and loses the card layout.
+  // Each ``###`` h3 starts a new Q&A; everything until the next
+  // ``###`` (or end of body) is the answer.
+  if (/^###\s/m.test(body)) {
+    const blocks = body.split(/(?=^###\s)/m);
+    for (const block of blocks) {
+      const qMatch = block.match(/^###\s+([^\n]+)\n([\s\S]*)/);
+      if (!qMatch) continue;
+      const question = qMatch[1].trim();
+      const answer = qMatch[2]
+        .replace(/^---\s*$/gm, "")
+        .trim();
+      if (question && answer) {
+        pairs.push({ question, answer });
+      }
+    }
+    return pairs;
+  }
+
+  // Path C — ``**Question?**\nAnswer paragraph`` form. Bold-prefixed
+  // questions without the ``Q:`` marker. Each bold line that ends
+  // with ``?`` starts a new pair; the prose until the next bold line
+  // is the answer.
+  if (/^\*\*[^*]+\?\*\*/m.test(body)) {
+    const blocks = body.split(/(?=^\*\*[^*]+\?\*\*)/m);
+    for (const block of blocks) {
+      const qMatch = block.match(/^\*\*([^*]+\?)\*\*\s*\n?([\s\S]*)/);
+      if (!qMatch) continue;
+      const question = qMatch[1].trim();
+      const answer = qMatch[2]
+        .replace(/^---\s*$/gm, "")
+        .trim();
+      if (question && answer) {
+        pairs.push({ question, answer });
+      }
+    }
+    return pairs;
   }
 
   return pairs;

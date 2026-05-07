@@ -2486,6 +2486,27 @@ class WikiCompiler:
         # Second line of defence after _SOURCES_RE for non-trailing source lists.
         content = WikiCompiler._strip_orphan_citations(content)
 
+        # 1d. Strip bracketed UUID / fact-id citation markers the LLM
+        # sometimes emits as literal prose (e.g.,
+        # ``[05d0b2e3-..., e6abd025-...]`` or ``[f_abc123, f_xyz789]``).
+        # The expected citation form is the digit-bracket ``[1, 2]``
+        # marker that the renderer turns into chips, OR the ``f_xxx``
+        # form on narrative pages. Anything ELSE inside ``[...]`` that
+        # looks like a UUID / hex hash / ``f_``-prefixed id is a prompt
+        # leak — strip it (and the trailing space if it was preceded
+        # by one) so the prose reads cleanly.
+        content = re.sub(
+            r"\s*\[(?:"
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+            r"|f_[A-Za-z0-9]+"
+            r")(?:\s*,\s*(?:"
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+            r"|f_[A-Za-z0-9]+"
+            r"))*\]",
+            "",
+            content,
+        )
+
         # 1d. Auto-close unclosed ```mermaid fences. Must run BEFORE the
         # _MERMAID_BLOCK_RE substitution below, otherwise orphan openers
         # pass through unmodified and break downstream rendering.
