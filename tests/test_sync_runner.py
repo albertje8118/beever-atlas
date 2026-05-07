@@ -188,7 +188,7 @@ async def test_run_sync_marks_completed_with_errors_when_batches_fail(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -352,7 +352,7 @@ async def test_run_sync_upserts_messages_to_message_store(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -420,7 +420,7 @@ async def test_run_sync_continues_when_message_store_upsert_fails(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -495,7 +495,7 @@ async def test_run_sync_increments_total_by_inserted_count_not_parent_count(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -570,7 +570,7 @@ async def test_run_sync_increment_falls_back_to_parent_count_on_upsert_failure(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -639,7 +639,7 @@ async def test_run_sync_advances_cursor_even_when_batches_fail(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -850,7 +850,7 @@ async def test_run_sync_skips_inline_extraction_when_decouple_flag_on(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
@@ -932,7 +932,7 @@ async def test_run_sync_runs_inline_extraction_when_decouple_flag_off(
         return NS(ingestion=NS(), sync=NS(max_messages=100))
 
     monkeypatch.setattr(
-        "beever_atlas.services.sync_runner.resolve_effective_policy",
+        "beever_atlas.services.policy_resolver.resolve_effective_policy",
         _fake_resolve_policy,
         raising=False,
     )
