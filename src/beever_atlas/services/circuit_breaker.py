@@ -164,6 +164,7 @@ class CircuitBreaker:
             if self._state in ("open", "half_open"):
                 self._transition(previous_state, "closed")
                 self._opened_at = None
+                self._half_open_at = None
 
     async def record_failure(self, exc: BaseException | None = None) -> None:
         """Increment failure count; trip / re-trip the breaker as needed."""
@@ -173,6 +174,7 @@ class CircuitBreaker:
                 # Probe failed — back to open with a fresh cooldown.
                 self._transition("half_open", "open")
                 self._opened_at = time.monotonic()
+                self._half_open_at = None
                 return
             if self._state == "closed" and self._consecutive_failures >= self._threshold:
                 self._transition("closed", "open")
@@ -215,6 +217,7 @@ class CircuitBreaker:
         self._state = "closed"
         self._consecutive_failures = 0
         self._opened_at = None
+        self._half_open_at = None
         self._last_transition = None
 
     # ------------------------------------------------------------------
