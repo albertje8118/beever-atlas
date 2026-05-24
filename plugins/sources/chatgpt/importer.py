@@ -7,19 +7,19 @@ RAG pipeline (Weaviate + Neo4j + MongoDB).
 Usage::
 
     # Preview what would be imported (no writes, no API keys needed):
-    uv run python -m plugins.chatgpt_copilot.chatgpt.importer
+    uv run python -m plugins.sources.chatgpt.importer
 
     # Import all conversations (requires GOOGLE_API_KEY + JINA_API_KEY + stores running):
-    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest
+    uv run python -m plugins.sources.chatgpt.importer --ingest
 
     # Import a single conversation by ID or partial title match:
-    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest --conversation "LiPo Battery"
+    uv run python -m plugins.sources.chatgpt.importer --ingest --conversation "LiPo Battery"
 
     # Limit to the N most recent conversations:
-    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --ingest --limit 5
+    uv run python -m plugins.sources.chatgpt.importer --ingest --limit 5
 
     # Use a different JSON file:
-    uv run python -m plugins.chatgpt_copilot.chatgpt.importer --file path/to/history.json
+    uv run python -m plugins.sources.chatgpt.importer --file path/to/history.json
 """
 
 from __future__ import annotations
@@ -33,13 +33,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Project root is 3 levels above: plugins/chatgpt_copilot/chatgpt/importer.py
+# Project root is 3 levels above: plugins/sources/chatgpt/importer.py
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Load .env before any project imports
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(_PROJECT_ROOT / ".env")
+
+# Activate plugins (embedded stores patch, LLM patch) so standalone runs work too
+import sys as _sys  # noqa: E402
+
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+from plugins.loader import load_plugins as _load_plugins  # noqa: E402
+
+_load_plugins()
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -121,9 +130,9 @@ def _show_dry_run(conversations: list[dict[str, Any]], limit: int | None) -> Non
     subset = conversations[:limit] if limit else conversations
     total_msgs = sum(len(c.get("messages", [])) for c in subset)
 
-    print(f"\n{'─' * 70}")
+    print(f"\n{'-' * 70}")
     print(f"  ChatGPT History Import — DRY RUN")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  Source file    : {DEFAULT_HISTORY_FILE}")
     print(f"  Conversations  : {len(subset)} / {len(conversations)} total")
     print(f"  Messages total : {total_msgs}")
@@ -142,7 +151,7 @@ def _show_dry_run(conversations: list[dict[str, Any]], limit: int | None) -> Non
             print(f"           First: {preview!r}")
         print()
 
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  To import for real, run with:  --ingest")
     print(f"  Requirements:  GOOGLE_API_KEY, JINA_API_KEY, docker compose up")
     print()
@@ -178,9 +187,9 @@ async def _ingest(
     if limit:
         subset = subset[:limit]
 
-    print(f"\n{'─' * 70}")
+    print(f"\n{'-' * 70}")
     print(f"  ChatGPT History Import — INGESTING")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  Conversations to import : {len(subset)}")
 
     stores = StoreClients.from_settings(settings)
@@ -218,7 +227,7 @@ async def _ingest(
 
     await stores.shutdown()
     print()
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  Done. Total facts: {total_facts}, Total entities: {total_entities}")
     print()
 
@@ -260,7 +269,7 @@ def main() -> None:
     if not history_path.exists():
         raise SystemExit(
             f"History file not found: {history_path}\n"
-            "Run the fetch script first: python -m plugins.chatgpt_copilot.chatgpt.fetch"
+            "Run the fetch script first: python -m plugins.sources.chatgpt.fetch"
         )
 
     conversations: list[dict[str, Any]] = json.loads(history_path.read_text(encoding="utf-8"))

@@ -33,6 +33,13 @@ dependencies = [
     "slowapi>=0.1.9",
     "aiolimiter>=1.1.0",
     "python-multipart>=0.0.27,<1.0.0",
+    "kuzu>=0.11.3",
+    "chromadb>=1.5.8",
+    "mongomock>=4.3.0",
+    "mongomock-motor>=0.0.36",
+    "aiosqlite>=0.22.1",
+    "sentence-transformers>=3.0.0",
+    "browser-cookie3>=0.19.1",
 ]
 
 [project.optional-dependencies]

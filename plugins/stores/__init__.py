@@ -1,0 +1,1 @@
+# Stores plugin namespace package

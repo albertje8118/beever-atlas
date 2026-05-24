@@ -8,7 +8,7 @@ Saves to ``chatgpt_history.json`` in the project root.
 Usage::
 
     # From the project root:
-    python -m plugins.chatgpt_copilot.chatgpt.fetch
+    python -m plugins.sources.chatgpt.fetch
 
     # Or via the convenience wrapper at project root:
     python fetch_chatgpt.py
@@ -21,7 +21,7 @@ import urllib.request
 import pathlib
 import sys
 
-# Project root is 3 levels above this file: plugins/chatgpt_copilot/chatgpt/fetch.py
+# Project root is 3 levels above this file: plugins/sources/chatgpt/fetch.py
 _PROJECT_ROOT = pathlib.Path(__file__).parents[3]
 TOKEN_FILE = _PROJECT_ROOT / "chatgpt_token.txt"
 OUTPUT_FILE = _PROJECT_ROOT / "chatgpt_history.json"
@@ -116,29 +116,78 @@ def main():
         raw = cdp_eval(ws, js, msg_id=msg_id, await_promise=True, timeout=timeout)
         return json.loads(raw) if raw else None
 
-    # Step 1: Fetch all conversation stubs (paginated, active + archived)
+    # Step 1: Fetch all conversation stubs (paginated: active, archived, pinned, projects)
+    LIMIT = 28
     print("Fetching conversation list...")
     stubs = []
-    for archived in [False, True]:
+
+    def _fetch_conversation_pages(base_url: str, archived: bool) -> list[dict]:
+        """Paginate through all pages of a conversations endpoint."""
+        results = []
         offset = 0
         while True:
-            url = (
-                f"/backend-api/conversations?offset={offset}&limit=28&order=updated"
-                + ("&is_archived=true" if archived else "")
-            )
-            data = cdp_fetch_json(url, msg_id=len(stubs) + 200)
+            sep = "&" if "?" in base_url else "?"
+            url = f"{base_url}{sep}offset={offset}&limit={LIMIT}&order=updated"
+            data = cdp_fetch_json(url, msg_id=len(stubs) + len(results) + 200)
             if not data or not data.get("items"):
                 break
-            for item in data["items"]:
+            items = data["items"]
+            for item in items:
                 item["_archived"] = archived
-            stubs.extend(data["items"])
-            if len([s for s in stubs if s["_archived"] == archived]) >= data.get("total", 0):
+            results.extend(items)
+            # Stop when last page (fewer items than limit, or total reached)
+            total = data.get("total")
+            if total is not None and len(results) >= total:
                 break
-            offset += 28
+            if len(items) < LIMIT:
+                break
+            offset += LIMIT
+        return results
+
+    # Regular active conversations
+    stubs.extend(_fetch_conversation_pages("/backend-api/conversations", archived=False))
+    # Archived conversations
+    stubs.extend(_fetch_conversation_pages(
+        "/backend-api/conversations?is_archived=true", archived=True
+    ))
+
+    # Projects (folders) — fetch project list then each project's conversations
+    print("Fetching projects...")
+    projects_data = cdp_fetch_json("/backend-api/projects?offset=0&limit=50", msg_id=900)
+    projects = (projects_data or {}).get("projects") or (projects_data or {}).get("items") or []
+    for proj in projects:
+        proj_id = proj.get("id")
+        proj_name = proj.get("name") or proj_id
+        if not proj_id:
+            continue
+        print(f"  Fetching project: {proj_name}")
+        proj_stubs = _fetch_conversation_pages(
+            f"/backend-api/projects/{proj_id}/conversations", archived=False
+        )
+        for s in proj_stubs:
+            s["_project_id"] = proj_id
+            s["_project_name"] = proj_name
+        stubs.extend(proj_stubs)
+
+    # Deduplicate by conversation id (a conversation may appear in both project and main list)
+    seen_ids: set = set()
+    unique_stubs = []
+    for s in stubs:
+        cid = s.get("id")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            unique_stubs.append(s)
+    stubs = unique_stubs
 
     active = sum(1 for s in stubs if not s["_archived"])
     archived_count = sum(1 for s in stubs if s["_archived"])
-    print(f"Found {len(stubs)} conversations ({active} active, {archived_count} archived).")
+    pinned_count = sum(1 for s in stubs if s.get("is_pinned"))
+    project_count = sum(1 for s in stubs if s.get("_project_id"))
+    print(
+        f"Found {len(stubs)} conversations "
+        f"({active} active, {archived_count} archived, "
+        f"{pinned_count} pinned, {project_count} in projects)."
+    )
 
     # Step 2: Fetch full content for each conversation
     all_convs = []
@@ -152,6 +201,9 @@ def main():
             "created": stub.get("create_time"),
             "updated": stub.get("update_time"),
             "archived": stub.get("_archived", False),
+            "pinned": bool(stub.get("is_pinned")),
+            "project_id": stub.get("_project_id"),
+            "project_name": stub.get("_project_name"),
             "messages": messages,
         })
         if (i + 1) % 10 == 0 or i == len(stubs) - 1:

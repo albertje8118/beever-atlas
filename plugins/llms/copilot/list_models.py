@@ -1,9 +1,9 @@
 """List models available from the GitHub Copilot API.
 
 Usage:
-    python -m plugins.chatgpt_copilot.list_models
+    python -m plugins.llms.copilot.list_models
     # or from project root:
-    uv run python -m plugins.chatgpt_copilot.list_models
+    uv run python -m plugins.llms.copilot.list_models
 
 Authentication (first match wins):
     COPILOT_GITHUB_TOKEN=...   # explicit Copilot token
@@ -18,7 +18,7 @@ import sys
 
 
 def main() -> None:
-    from plugins.chatgpt_copilot._llm_patch import get_copilot_token, COPILOT_API_BASE
+    from plugins.llms.copilot._llm_patch import get_copilot_token, COPILOT_API_BASE
     import urllib.request
 
     token = get_copilot_token()

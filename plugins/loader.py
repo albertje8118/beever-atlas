@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 # Ordered list of plugin module paths to activate at startup.
 # Add or remove entries here to enable/disable plugins.
 _PLUGINS: list[str] = [
-    "plugins.chatgpt_copilot",
+    "plugins.stores.embedded",   # must load first — patches Motor before any beever_atlas import
+    "plugins.llms.copilot",      # GitHub Copilot / GitHub Models LLM provider
+    "plugins.sources.chatgpt",   # ChatGPT history ingestion + scheduled sync
+    "plugins.web",               # web UI extensions: Copilot model picker + ChatGPT source panel
 ]
 
 
